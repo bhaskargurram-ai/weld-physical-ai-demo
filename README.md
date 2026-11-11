@@ -106,6 +106,9 @@ python3 runpod/launch.py      # or: make cloud-run   (make cloud-serve keeps the
 
 The volume is kept (models + venvs + results, about $21/month) so the next run starts in minutes;
 `python3 runpod/launch.py down --delete-volume` (or `DELETE_VOLUME_AT_END=1`) removes it.
+Download results to your computer (no pod needed; uses the volume's S3 API, needs `pip install boto3` and an
+S3 API key in `.env`): `python runpod/download.py` (summaries and logs) or `python runpod/download.py demo`
+(also the Cosmos results cache, curated clips and simulated passes, so the copilot runs locally in replay mode).
 `status`, `logs`, `down` and `availability` (which data centers have GPUs right now) are the other commands.
 If the volume's data center is sold out: `--wait 30` keeps retrying for 30 minutes, `--move-volume` recreates the
 volume where GPUs are free (its cached weights are re-downloaded). All settings are documented in `.env.example`.

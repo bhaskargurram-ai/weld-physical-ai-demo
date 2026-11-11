@@ -12,3 +12,5 @@ checkpoints/
 data/*
 !data/.gitkeep
 .runpod_state.json
+runpod_results/
+*.part
