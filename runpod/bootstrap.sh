@@ -22,6 +22,7 @@
 #   WITH_ANOMALYGEN=1    also download nvidia/Cosmos-AnomalyGen-Metal-Nano (defect LoRA)
 #   CURATOR_MODELS=transnetv2,qwen3_8_27b_fp8,cosmos_embed1_336p
 #   PYTHON_VERSION=3.12  MINIO_VERSION=latest  MOSAICOD_IMAGE=ghcr.io/mosaico-labs/mosaicod:latest
+#   MOSAICO_REF=v0.7.0   git tag for the source-build fallback (default: latest release tag, matching PyPI mosaicolabs)
 set -Eeuo pipefail
 
 # shellcheck source=runpod/lib.sh
