@@ -7,6 +7,7 @@
 Commands
     run        create/reuse the network volume, create the GPU pod, follow its logs, terminate at the end
     status     show the pod/volume recorded in .runpod_state.json
+    availability  which data centers list stock for your GPU types right now
     logs       re-attach to the running pod's log stream (terminates it when the run finishes)
     down       terminate the pod now (add --delete-volume to also delete the storage)
 
@@ -341,7 +342,7 @@ def _short(gpu: str) -> str:
     return gpu.replace("NVIDIA ", "").replace(" 80GB HBM3", " SXM")
 
 
-def try_pod_in(rp: Runpod, cfg: dict, vol: dict) -> dict | None:
+def try_pod_in(rp: Runpod, cfg: dict, vol: dict, quiet: bool = False) -> dict | None:
     """Try every (gpu, count, cuda) fallback in the volume's data center. Returns the pod or None."""
     for gpu, count, cuda in pod_attempts(cfg):
         label = f"{count}x {_short(gpu)}, CUDA>={cuda or 'any'} in {vol['dataCenter']}"
@@ -354,7 +355,8 @@ def try_pod_in(rp: Runpod, cfg: dict, vol: dict) -> dict | None:
                                  "runpod/pytorch:2.1.0-cu1300-torch2130-ubuntu2404 "
                                  "(list: https://hub.docker.com/r/runpod/pytorch/tags)") from None
             if e.status in (400, 409, 503) or "available" in e.body.lower():
-                log(f"  - {label}: none free")
+                if not quiet:
+                    log(f"  - {label}: none free")
                 continue
             raise SystemExit(f"Pod creation failed ({label}): {e}") from None
         notes = []
@@ -395,38 +397,77 @@ def delete_volume_when_free(rp: Runpod, vid: str) -> bool:
     return False
 
 
-def create_pod(rp: Runpod, cfg: dict, vol: dict) -> tuple[dict, dict]:
-    """Create the pod next to the volume; if nothing fits there and the volume was never used,
-    move the (empty) volume to another data center with stock. Returns (pod, volume)."""
+def create_pod(rp: Runpod, cfg: dict, vol: dict, move_volume: bool = False,
+               wait_minutes: float = 0) -> tuple[dict, dict]:
+    """Create the pod next to the volume. If nothing fits there, move the volume to a data center with
+    stock when that is safe (never used) or explicitly allowed (--move-volume), else retry until
+    --wait minutes have passed. Returns (pod, volume)."""
+    deadline = time.time() + wait_minutes * 60
     log(f"looking for a GPU pod in {vol['dataCenter']} (preferred {cfg['GPU_COUNT']}x {_short(gpu_types(cfg)[0])}, "
         f"CUDA>={cfg.get('MIN_CUDA_VERSION') or 'any'})")
-    pod = try_pod_in(rp, cfg, vol)
-    if pod:
-        return pod, vol
-    # only move a volume this checkout created/tracked and that has never had a pod: it is empty
-    never_used = bool(vol.get("_known")) and vol["id"] not in (load_state().get("used_volumes") or [])
-    if cfg.get("AUTO_RELOCATE_VOLUME") != "1" or cfg.get("DATA_CENTER") or not never_used:
-        why = ("it already holds data from a previous run" if not never_used
-               else "AUTO_RELOCATE_VOLUME=0 or DATA_CENTER is set")
-        raise SystemExit(f"No GPU pod available in {vol['dataCenter']} (volume '{vol.get('name')}' lives there; "
-                         f"not moving it because {why}). Try again later, add GPU types to GPU_FALLBACK_TYPES, or "
-                         "delete the volume with `launch.py down --delete-volume` to start in another data center.")
-    for dc in ranked_datacenters(rp, gpu_types(cfg), exclude=vol["dataCenter"])[:4]:
-        log(f"volume '{vol.get('name')}' is empty -> moving it to {dc}, which lists stock")
-        if not delete_volume_when_free(rp, vol["id"]):
-            break
-        save_state(volume_id=None)
-        vol = rp.create_volume(cfg["VOLUME_NAME"], int(cfg["VOLUME_SIZE_GB"]), dc)
-        vol.setdefault("dataCenter", dc)
-        vol.setdefault("name", cfg["VOLUME_NAME"])
-        vol["_known"] = True
-        save_state(volume_id=vol["id"], data_center=dc)
-        pod = try_pod_in(rp, cfg, vol)
+    rounds = 0
+    while True:
+        pod = try_pod_in(rp, cfg, vol, quiet=rounds > 0)
         if pod:
             return pod, vol
-    raise SystemExit("No GPU capacity found for any GPU type / data center right now. Runpod stock changes by the "
-                     "minute: retry in a few minutes, or widen GPU_FALLBACK_TYPES. "
-                     f"(volume '{cfg['VOLUME_NAME']}' is in {vol['dataCenter']})")
+        rounds += 1
+        never_used = bool(vol.get("_known")) and vol["id"] not in (load_state().get("used_volumes") or [])
+        can_move = (cfg.get("AUTO_RELOCATE_VOLUME") == "1" and not cfg.get("DATA_CENTER")
+                    and (never_used or move_volume))
+        if can_move:
+            for dc in ranked_datacenters(rp, gpu_types(cfg), exclude=vol["dataCenter"])[:4]:
+                if never_used:
+                    log(f"volume '{vol.get('name')}' is empty -> moving it to {dc}, which lists stock")
+                else:
+                    log(f"--move-volume: deleting '{vol.get('name')}' in {vol['dataCenter']} (cached weights/envs; "
+                        f"the next setup re-downloads them, ~30 min) and recreating it in {dc}")
+                if not delete_volume_when_free(rp, vol["id"]):
+                    break
+                save_state(volume_id=None)
+                vol = rp.create_volume(cfg["VOLUME_NAME"], int(cfg["VOLUME_SIZE_GB"]), dc)
+                vol.setdefault("dataCenter", dc)
+                vol.setdefault("name", cfg["VOLUME_NAME"])
+                vol["_known"] = True
+                never_used = True
+                save_state(volume_id=vol["id"], data_center=dc)
+                pod = try_pod_in(rp, cfg, vol)
+                if pod:
+                    return pod, vol
+        if time.time() < deadline:
+            log(f"nothing free in {vol['dataCenter']} — retrying every 2 min until "
+                f"{time.strftime('%H:%M', time.localtime(deadline))} (Ctrl-C to stop)")
+            time.sleep(min(120, max(5, deadline - time.time())))
+            continue
+        if not can_move and not never_used:
+            raise SystemExit(
+                f"No GPU pod free in {vol['dataCenter']}, where volume '{vol.get('name')}' lives (it holds cached "
+                "weights/envs from an earlier run, so it was not moved automatically). Options:\n"
+                "  python runpod/launch.py availability        # see which data centers have GPUs now\n"
+                "  python runpod/launch.py --wait 30           # keep retrying here for 30 minutes\n"
+                "  python runpod/launch.py --move-volume       # recreate the volume where GPUs are free "
+                "(re-downloads ~30 min of setup)")
+        raise SystemExit("No GPU capacity found for any GPU type / data center right now. Runpod stock changes by "
+                         "the minute: retry with --wait 30, or widen GPU_FALLBACK_TYPES. "
+                         f"(volume '{cfg['VOLUME_NAME']}' is in {vol['dataCenter']})")
+
+
+def availability_table(rp: Runpod, cfg: dict, vol_dc: str = "") -> str:
+    gpus = gpu_types(cfg)
+    rows = []
+    for dc in rp.datacenters():
+        if not dc.get("networkVolumeTypes"):
+            continue
+        avail = {g.get("id"): g.get("availability", "NONE") for g in dc.get("gpuAvailability") or []}
+        cells = [avail.get(g, "-") for g in gpus]
+        if any(c in ("LOW", "MEDIUM", "HIGH") for c in cells) or dc["id"] == vol_dc:
+            rows.append((dc["id"] + (" *" if dc["id"] == vol_dc else ""), cells))
+    rows.sort(key=lambda r: -sum(AVAIL_SCORE.get(c, 0) for c in r[1]))
+    w = max([len(r[0]) for r in rows] + [11])
+    head = "data center".ljust(w) + "  " + "  ".join(_short(g)[:12].ljust(12) for g in gpus)
+    lines = [head, "-" * len(head)]
+    lines += [n.ljust(w) + "  " + "  ".join(c.ljust(12) for c in cells) for n, cells in rows]
+    lines.append("(* = where your volume is; stock per GPU type, not per count or CUDA version)")
+    return "\n".join(lines)
 
 
 class Follower:
@@ -602,7 +643,7 @@ def cmd_run(rp: Runpod, cfg: dict, args) -> int:
         return 0
     vol = ensure_volume(rp, cfg)
     save_state(volume_id=vol["id"], volume_name=cfg["VOLUME_NAME"], data_center=vol["dataCenter"])
-    pod, vol = create_pod(rp, cfg, vol)
+    pod, vol = create_pod(rp, cfg, vol, move_volume=args.move_volume, wait_minutes=args.wait)
     used = sorted(set(load_state().get("used_volumes") or []) | {vol["id"]})
     save_state(pod_id=pod["id"], started=time.strftime("%Y-%m-%dT%H:%M:%S"), run_mode=cfg["RUN_MODE"],
                volume_id=vol["id"], data_center=vol["dataCenter"], used_volumes=used)
@@ -634,6 +675,11 @@ def cmd_status(rp: Runpod, cfg: dict, args) -> int:
     return 0
 
 
+def cmd_availability(rp: Runpod, cfg: dict, args) -> int:
+    print(availability_table(rp, cfg, load_state().get("data_center") or ""))
+    return 0
+
+
 def cmd_down(rp: Runpod, cfg: dict, args) -> int:
     teardown(rp, cfg, load_state().get("pod_id"), args.delete_volume)
     return 0
@@ -641,13 +687,18 @@ def cmd_down(rp: Runpod, cfg: dict, args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("command", nargs="?", default="run", choices=["run", "status", "logs", "down"])
+    p.add_argument("command", nargs="?", default="run", choices=["run", "status", "logs", "down", "availability"])
     p.add_argument("--env-file", default=str(REPO_ROOT / ".env"))
     p.add_argument("--mode", choices=["job", "serve"], help="override RUN_MODE")
     p.add_argument("--detach", action="store_true", help="create the pod and exit (it still self-terminates)")
     p.add_argument("--delete-volume", action="store_true", help="down: also delete the network volume")
     p.add_argument("--force", action="store_true", help="run: start even if a previous pod is recorded")
     p.add_argument("--dry-run", action="store_true", help="run: print the pod request and exit")
+    p.add_argument("--wait", type=float, default=0, metavar="MIN",
+                   help="run: keep retrying for MIN minutes when no GPU is free")
+    p.add_argument("--move-volume", action="store_true",
+                   help="run: if the volume's data center is sold out, recreate the volume where GPUs are free "
+                        "(its cached weights/envs are re-downloaded)")
     args = p.parse_args(argv)
 
     env_path = Path(args.env_file)
@@ -660,7 +711,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("RUNPOD_API_KEY is empty (.env)")
     rp = Runpod(cfg.get("RUNPOD_API_KEY", ""))
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
-    return {"run": cmd_run, "status": cmd_status, "logs": cmd_logs, "down": cmd_down}[args.command](rp, cfg, args)
+    return {"run": cmd_run, "status": cmd_status, "logs": cmd_logs, "down": cmd_down,
+            "availability": cmd_availability}[args.command](rp, cfg, args)
 
 
 if __name__ == "__main__":

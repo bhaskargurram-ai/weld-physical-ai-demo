@@ -106,7 +106,9 @@ python3 runpod/launch.py      # or: make cloud-run   (make cloud-serve keeps the
 
 The volume is kept (models + venvs + results, about $21/month) so the next run starts in minutes;
 `python3 runpod/launch.py down --delete-volume` (or `DELETE_VOLUME_AT_END=1`) removes it.
-`status`, `logs` and `down` are the other commands. All settings are documented in `.env.example`.
+`status`, `logs`, `down` and `availability` (which data centers have GPUs right now) are the other commands.
+If the volume's data center is sold out: `--wait 30` keeps retrying for 30 minutes, `--move-volume` recreates the
+volume where GPUs are free (its cached weights are re-downloaded). All settings are documented in `.env.example`.
 
 ## Quickstart C: manual setup on a Runpod pod (live Cosmos 3 + Curator)
 

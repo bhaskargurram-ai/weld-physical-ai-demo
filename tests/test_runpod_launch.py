@@ -231,7 +231,7 @@ def test_volume_with_data_is_never_moved(env_file, monkeypatch):
     api = FakeApi(unavailable=lambda b: True,
                   volumes=[{"id": "vol_old", "name": "weldworld", "size": 300, "dataCenter": "US-CA-2"}])
     monkeypatch.setattr(launch.urllib.request, "urlopen", api)
-    with pytest.raises(SystemExit, match="already holds data"):
+    with pytest.raises(SystemExit, match="not moved automatically"):
         launch.main(["run", "--env-file", str(env_file)])
     assert not any(m == "DELETE" for m, _, _ in api.calls)
 
@@ -256,3 +256,39 @@ def test_image_pull_chatter_is_folded(capsys):
     out = capsys.readouterr().out
     assert out.count("Extracting") == 0 and out.count("pulling container image") == 1
     assert out.count("still fetching image") == 1 and "mounted at /workspace" in out
+
+
+def test_move_volume_flag_relocates_a_used_volume(env_file, monkeypatch):
+    # the user's case: volume in US-NE-1 holds caches from a run, US-NE-1 is sold out
+    launch.STATE_FILE.write_text(json.dumps({"volume_id": "vol_old", "used_volumes": ["vol_old"]}))
+    api = FakeApi(unavailable=lambda b: b["dataCenterIds"] == ["US-NE-1"],
+                  volumes=[{"id": "vol_old", "name": "weldworld", "size": 300, "dataCenter": "US-NE-1"}])
+    monkeypatch.setattr(launch.urllib.request, "urlopen", api)
+    assert launch.main(["run", "--env-file", str(env_file), "--move-volume"]) == 0
+    seq = [(m, p) for m, p, _ in api.calls]
+    assert ("DELETE", "/network-volumes/vol_old") in seq
+    assert next(b for m, p, b in api.calls if (m, p) == ("POST", "/network-volumes"))["dataCenter"] == "EU-RO-1"
+
+
+def test_wait_retries_until_a_gpu_frees_up(env_file, monkeypatch):
+    launch.STATE_FILE.write_text(json.dumps({"volume_id": "vol_old", "used_volumes": ["vol_old"]}))
+    rounds = {"n": 0}
+
+    def sold_out_first_round(body):
+        return rounds["n"] < 1
+
+    api = FakeApi(unavailable=sold_out_first_round,
+                  volumes=[{"id": "vol_old", "name": "weldworld", "size": 300, "dataCenter": "US-NE-1"}])
+    monkeypatch.setattr(launch.urllib.request, "urlopen", api)
+    monkeypatch.setattr(launch.time, "sleep", lambda s: rounds.__setitem__("n", rounds["n"] + 1))
+    assert launch.main(["run", "--env-file", str(env_file), "--wait", "30"]) == 0
+    assert rounds["n"] == 1
+    assert not any(m == "DELETE" and p.startswith("/network-volumes") for m, p, _ in api.calls)  # stayed put
+
+
+def test_availability_table_lists_datacenters_with_stock(env_file, monkeypatch, capsys):
+    launch.STATE_FILE.write_text(json.dumps({"data_center": "US-TX-3"}))
+    monkeypatch.setattr(launch.urllib.request, "urlopen", FakeApi())
+    assert launch.main(["availability", "--env-file", str(env_file)]) == 0
+    out = capsys.readouterr().out
+    assert out.index("EU-RO-1") < out.index("US-TX-3 *") and "NO-VOL" not in out and "HIGH" in out
