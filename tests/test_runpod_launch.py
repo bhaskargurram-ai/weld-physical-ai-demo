@@ -25,7 +25,7 @@ class FakeApi:
 
     def __init__(self, unavailable=("NVIDIA H100 80GB HBM3",), volumes=None, log_lines=None):
         self.calls: list[tuple[str, str, dict | None]] = []
-        self.unavailable = set(unavailable)
+        self.unavailable = unavailable if callable(unavailable) else set(unavailable)
         self.volumes = list(volumes or [])
         self.pod_status = "RUNNING"
         self.log_lines = log_lines or ["WELDWORLD 00:00:01 START run=x", "WELDWORLD 00:10:00 DONE rc=0"]
@@ -55,11 +55,15 @@ class FakeApi:
                  "gpuAvailability": [{"id": "NVIDIA H100 80GB HBM3", "availability": "HIGH"}]},
             ]})
         if (method, path) == ("POST", "/network-volumes"):
-            v = {"id": "vol_1", "name": body["name"], "size": body["size"], "dataCenter": body["dataCenter"]}
+            n = sum(1 for m, p, _ in self.calls if (m, p) == ("POST", "/network-volumes"))
+            v = {"id": f"vol_{n}", "name": body["name"], "size": body["size"], "dataCenter": body["dataCenter"]}
             self.volumes.append(v)
             return ok(v, 201)
         if (method, path) == ("POST", "/pods"):
-            if body["gpu"]["id"] in self.unavailable:
+            if callable(self.unavailable):
+                if self.unavailable(body):
+                    err(400, "There are no longer any instances available with the requested specifications.")
+            elif body["gpu"]["id"] in self.unavailable:
                 err(400, "There are no instances currently available")
             return ok({"id": "pod_1", "cost": 5.98, **body}, 201)
         if method == "GET" and path == "/pods/pod_1/logs":
@@ -73,6 +77,7 @@ class FakeApi:
             self.pod_status = "TERMINATED"
             return FakeResp(b"")
         if method == "DELETE" and path.startswith("/network-volumes/"):
+            self.volumes = [v for v in self.volumes if v["id"] != path.rsplit("/", 1)[1]]
             return FakeResp(b"")
         err(404, f"unexpected {method} {path}")
 
@@ -94,7 +99,8 @@ def test_parse_env_file_handles_comments_quotes_spaces(env_file):
     cfg = launch.parse_env_file(env_file)
     assert cfg["HF_TOKEN"] == "hf_x"
     assert cfg["ANTHROPIC_API_KEY"] == "sk-ant-x"
-    assert launch.gpu_types(cfg) == ["NVIDIA H100 80GB HBM3", "NVIDIA H100 NVL"]
+    assert launch.gpu_types(cfg)[:2] == ["NVIDIA H100 80GB HBM3", "NVIDIA H100 NVL"]
+    assert launch.gpu_types(cfg).count("NVIDIA H100 NVL") == 1          # fallbacks de-duplicated
 
 
 def test_example_env_parses_and_has_required_keys():
@@ -185,3 +191,55 @@ def test_bad_image_stops_immediately(env_file, monkeypatch):
 def test_default_image_tag_is_a_published_release():
     cfg = launch.parse_env_file(ROOT / ".env.example")
     assert cfg["IMAGE"] == launch.DEFAULTS["IMAGE"] == "runpod/pytorch:2.1.0-cu1300-torch2130-ubuntu2404"
+
+
+def test_attempt_order_prefers_cuda13_then_two_gpus():
+    cfg = dict(launch.DEFAULTS, GPU_TYPE="G1", GPU_FALLBACK_TYPES="G2")
+    assert launch.pod_attempts(cfg) == [("G1", 2, "13.0"), ("G2", 2, "13.0"), ("G1", 1, "13.0"), ("G2", 1, "13.0"),
+                                        ("G1", 2, "12.8"), ("G2", 2, "12.8"), ("G1", 1, "12.8"), ("G2", 1, "12.8")]
+    cfg.update(ALLOW_SINGLE_GPU="0", ALLOW_CUDA_FALLBACK="0")
+    assert launch.pod_attempts(cfg) == [("G1", 2, "13.0"), ("G2", 2, "13.0")]
+
+
+def test_pod_body_adapts_env_to_a100_and_cuda12(env_file):
+    cfg = launch.load_config(env_file)
+    env = launch.pod_body(cfg, "NVIDIA A100-SXM4-80GB", "v", "dc", count=1, min_cuda="12.8")["env"]
+    assert env["GENERATOR_PRECISION"] == "bf16" and env["OFFLOAD"] == "1" and env["CURATE_BACKEND"] == "lite"
+    env = launch.pod_body(cfg, "NVIDIA H100 80GB HBM3", "v", "dc")["env"]
+    assert "GENERATOR_PRECISION" not in env and env["CURATE_BACKEND"] == "curator-next"
+
+
+def test_empty_volume_is_moved_when_its_datacenter_is_sold_out(env_file, monkeypatch):
+    # the user's case: volume created in US-CA-2 by an earlier attempt, no pod ever ran, nothing free there
+    launch.STATE_FILE.write_text(json.dumps({"volume_id": "vol_old"}))
+    api = FakeApi(unavailable=lambda b: b["dataCenterIds"] == ["US-CA-2"],
+                  volumes=[{"id": "vol_old", "name": "weldworld", "size": 300, "dataCenter": "US-CA-2"}])
+    monkeypatch.setattr(launch.urllib.request, "urlopen", api)
+    assert launch.main(["run", "--env-file", str(env_file)]) == 0
+    seq = [(m, p) for m, p, _ in api.calls]
+    assert ("DELETE", "/network-volumes/vol_old") in seq
+    new_vol = next(b for m, p, b in api.calls if (m, p) == ("POST", "/network-volumes"))
+    assert new_vol["dataCenter"] == "EU-RO-1"
+    ok_pod = [b for m, p, b in api.calls if (m, p) == ("POST", "/pods")][-1]
+    assert ok_pod["dataCenterIds"] == ["EU-RO-1"] and ok_pod["gpu"]["count"] == 2
+    st = json.loads(launch.STATE_FILE.read_text())
+    assert st["used_volumes"] == [st["volume_id"]] and st["volume_id"] != "vol_old" and st["data_center"] == "EU-RO-1"
+
+
+def test_volume_with_data_is_never_moved(env_file, monkeypatch):
+    launch.STATE_FILE.write_text(json.dumps({"volume_id": "vol_old", "used_volumes": ["vol_old"]}))
+    api = FakeApi(unavailable=lambda b: True,
+                  volumes=[{"id": "vol_old", "name": "weldworld", "size": 300, "dataCenter": "US-CA-2"}])
+    monkeypatch.setattr(launch.urllib.request, "urlopen", api)
+    with pytest.raises(SystemExit, match="already holds data"):
+        launch.main(["run", "--env-file", str(env_file)])
+    assert not any(m == "DELETE" for m, _, _ in api.calls)
+
+
+def test_untracked_volume_is_never_moved(env_file, monkeypatch):
+    api = FakeApi(unavailable=lambda b: True,   # no state file: volume may hold someone else's data
+                  volumes=[{"id": "vol_x", "name": "weldworld", "size": 300, "dataCenter": "US-CA-2"}])
+    monkeypatch.setattr(launch.urllib.request, "urlopen", api)
+    with pytest.raises(SystemExit):
+        launch.main(["run", "--env-file", str(env_file)])
+    assert not any(m == "DELETE" for m, _, _ in api.calls)

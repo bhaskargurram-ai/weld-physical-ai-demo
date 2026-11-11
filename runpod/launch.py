@@ -61,6 +61,11 @@ DEFAULTS = {
     "VOLUME_SIZE_GB": "300",
     "DATA_CENTER": "",
     "DELETE_VOLUME_AT_END": "0",
+    # automatic fallbacks when the preferred GPU is sold out (each can be turned off with 0 / empty)
+    "GPU_FALLBACK_TYPES": "NVIDIA H100 NVL,NVIDIA H200,NVIDIA H100 PCIe,NVIDIA A100-SXM4-80GB,NVIDIA A100 80GB PCIe",
+    "ALLOW_SINGLE_GPU": "1",
+    "ALLOW_CUDA_FALLBACK": "1",
+    "AUTO_RELOCATE_VOLUME": "1",
     "POD_NAME": "weldworld",
 }
 AVAIL_SCORE = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "NONE": 0}
@@ -217,7 +222,25 @@ class Runpod:
 
 # ============================================================================ planning
 def gpu_types(cfg: dict) -> list[str]:
-    return [g.strip() for g in cfg["GPU_TYPE"].split(",") if g.strip()]
+    """GPU_TYPE (preferred, comma list) followed by GPU_FALLBACK_TYPES, without duplicates."""
+    out: list[str] = []
+    for g in (cfg.get("GPU_TYPE", "") + "," + cfg.get("GPU_FALLBACK_TYPES", "")).split(","):
+        g = g.strip()
+        if g and g not in out:
+            out.append(g)
+    return out
+
+
+def pod_attempts(cfg: dict) -> list[tuple[str, int, str]]:
+    """(gpu, count, min_cuda) in priority order: keep CUDA 13 (real Cosmos Curator) before keeping 2 GPUs,
+    keep 2 GPUs before falling back to CUDA 12.8 (Curator -> CPU 'lite' curation)."""
+    cuda = cfg.get("MIN_CUDA_VERSION", "")
+    cudas = [cuda]
+    if cfg.get("ALLOW_CUDA_FALLBACK") == "1" and cuda and float(cuda) > 12.8:
+        cudas.append("12.8")
+    count = int(cfg["GPU_COUNT"])
+    counts = [count] + ([1] if cfg.get("ALLOW_SINGLE_GPU") == "1" and count > 1 else [])
+    return [(g, n, c) for c in cudas for n in counts for g in gpu_types(cfg)]
 
 
 def pick_datacenter(dcs: list[dict], gpus: list[str], forced: str = "") -> str:
@@ -250,15 +273,26 @@ def pod_env(cfg: dict) -> dict[str, str]:
     return env
 
 
-def pod_body(cfg: dict, gpu: str, volume_id: str, data_center: str) -> dict:
-    gpu_spec: dict = {"id": gpu, "count": int(cfg["GPU_COUNT"])}
-    if cfg.get("MIN_CUDA_VERSION"):
-        gpu_spec["minCudaVersion"] = cfg["MIN_CUDA_VERSION"]
+def pod_body(cfg: dict, gpu: str, volume_id: str, data_center: str,
+             count: int | None = None, min_cuda: str | None = None) -> dict:
+    count = int(cfg["GPU_COUNT"]) if count is None else count
+    min_cuda = cfg.get("MIN_CUDA_VERSION", "") if min_cuda is None else min_cuda
+    gpu_spec: dict = {"id": gpu, "count": count}
+    if min_cuda:
+        gpu_spec["minCudaVersion"] = min_cuda
+    env = pod_env(cfg)
+    env["GPU_MODEL"] = gpu
+    if "A100" in gpu:  # Ampere has no FP8: keep the generator in BF16 (offloaded when it shares one GPU)
+        env["GENERATOR_PRECISION"] = "bf16"
+        if count == 1:
+            env["OFFLOAD"] = "1"
+    if min_cuda and float(min_cuda) < 13 and env.get("CURATE_BACKEND", "").startswith("curator"):
+        env["CURATE_BACKEND"] = "lite"  # Cosmos Curator needs a CUDA 13 driver
     return {
         "name": cfg["POD_NAME"],
         "image": cfg["IMAGE"],
         "cmd": ["bash", "-lc", BOOT_SCRIPT],
-        "env": pod_env(cfg),
+        "env": env,
         "ports": [f"{COPILOT_PORT}/http", "22/tcp"],
         "disk": int(cfg["CONTAINER_DISK_GB"]),
         "cloud": cfg["CLOUD"],
@@ -293,33 +327,106 @@ def ensure_volume(rp: Runpod, cfg: dict) -> dict:
     for v in rp.list_volumes():
         if v.get("name") == name:
             log(f"reusing network volume '{name}' ({v['id']}, {v.get('size')} GB, {v.get('dataCenter')})")
+            v["_known"] = load_state().get("volume_id") == v["id"]  # tracked by this checkout's state file
             return v
     dc = pick_datacenter(rp.datacenters(), gpu_types(cfg), cfg.get("DATA_CENTER", ""))
     log(f"creating network volume '{name}' ({cfg['VOLUME_SIZE_GB']} GB) in {dc}")
     v = rp.create_volume(name, int(cfg["VOLUME_SIZE_GB"]), dc)
     v.setdefault("dataCenter", dc)
+    v["_known"] = True
     return v
 
 
-def create_pod(rp: Runpod, cfg: dict, vol: dict) -> dict:
-    errors = []
-    for gpu in gpu_types(cfg):
-        body = pod_body(cfg, gpu, vol["id"], vol["dataCenter"])
-        log(f"creating pod: {cfg['GPU_COUNT']}x {gpu} in {vol['dataCenter']} (CUDA >= {cfg.get('MIN_CUDA_VERSION') or 'any'})")
+def _short(gpu: str) -> str:
+    return gpu.replace("NVIDIA ", "").replace(" 80GB HBM3", " SXM")
+
+
+def try_pod_in(rp: Runpod, cfg: dict, vol: dict) -> dict | None:
+    """Try every (gpu, count, cuda) fallback in the volume's data center. Returns the pod or None."""
+    for gpu, count, cuda in pod_attempts(cfg):
+        label = f"{count}x {_short(gpu)}, CUDA>={cuda or 'any'} in {vol['dataCenter']}"
         try:
-            pod = rp.create_pod(body)
-            log(f"pod {pod['id']} created (${pod.get('cost', '?')}/h compute)")
-            return pod
+            pod = rp.create_pod(pod_body(cfg, gpu, vol["id"], vol["dataCenter"], count, cuda))
         except ApiError as e:
             if e.status == 422 and "image" in e.body.lower():
                 raise SystemExit(f"Runpod rejected the container image: {e}\n"
                                  "Set IMAGE in .env to an existing tag, e.g. "
                                  "runpod/pytorch:2.1.0-cu1300-torch2130-ubuntu2404 "
                                  "(list: https://hub.docker.com/r/runpod/pytorch/tags)") from None
-            errors.append(f"{gpu}: {e}")
-            log(f"  not available: {e}")
-    raise SystemExit("Could not create a pod:\n  " + "\n  ".join(errors) +
-                     "\nTry more GPU types in GPU_TYPE, GPU_COUNT=1, or MIN_CUDA_VERSION=12.8 with CURATE_BACKEND=lite.")
+            if e.status in (400, 409, 503) or "available" in e.body.lower():
+                log(f"  - {label}: none free")
+                continue
+            raise SystemExit(f"Pod creation failed ({label}): {e}") from None
+        notes = []
+        if count < int(cfg["GPU_COUNT"]):
+            notes.append("single-GPU budget mode")
+        if cuda and float(cuda) < 13:
+            notes.append("CUDA 12.8 host -> Cosmos Curator replaced by CPU curation")
+        log(f"pod {pod['id']} created: {label} (${pod.get('cost', '?')}/h)" + (f"  [{'; '.join(notes)}]" if notes else ""))
+        return pod
+    return None
+
+
+def ranked_datacenters(rp: Runpod, gpus: list[str], exclude: str = "") -> list[str]:
+    """Data centers with network-volume support, best stock for the earliest GPU types first."""
+    ranked = []
+    for dc in rp.datacenters():
+        if dc.get("id") == exclude or not dc.get("networkVolumeTypes"):
+            continue
+        avail = {g.get("id"): AVAIL_SCORE.get(g.get("availability", "NONE"), 0) for g in dc.get("gpuAvailability") or []}
+        score = max(((len(gpus) - i) * 10 + avail.get(g, 0) for i, g in enumerate(gpus) if avail.get(g)), default=0)
+        if score:
+            ranked.append((score, dc["id"]))
+    return [d for _, d in sorted(ranked, reverse=True)]
+
+
+def delete_volume_when_free(rp: Runpod, vid: str) -> bool:
+    for _ in range(20):  # 409 while a pod still holds the mount
+        try:
+            rp.delete_volume(vid)
+            return True
+        except ApiError as e:
+            if e.status == 404:
+                return True
+            if e.status != 409:
+                log(f"  could not delete volume {vid}: {e}")
+                return False
+            time.sleep(15)
+    return False
+
+
+def create_pod(rp: Runpod, cfg: dict, vol: dict) -> tuple[dict, dict]:
+    """Create the pod next to the volume; if nothing fits there and the volume was never used,
+    move the (empty) volume to another data center with stock. Returns (pod, volume)."""
+    log(f"looking for a GPU pod in {vol['dataCenter']} (preferred {cfg['GPU_COUNT']}x {_short(gpu_types(cfg)[0])}, "
+        f"CUDA>={cfg.get('MIN_CUDA_VERSION') or 'any'})")
+    pod = try_pod_in(rp, cfg, vol)
+    if pod:
+        return pod, vol
+    # only move a volume this checkout created/tracked and that has never had a pod: it is empty
+    never_used = bool(vol.get("_known")) and vol["id"] not in (load_state().get("used_volumes") or [])
+    if cfg.get("AUTO_RELOCATE_VOLUME") != "1" or cfg.get("DATA_CENTER") or not never_used:
+        why = ("it already holds data from a previous run" if not never_used
+               else "AUTO_RELOCATE_VOLUME=0 or DATA_CENTER is set")
+        raise SystemExit(f"No GPU pod available in {vol['dataCenter']} (volume '{vol.get('name')}' lives there; "
+                         f"not moving it because {why}). Try again later, add GPU types to GPU_FALLBACK_TYPES, or "
+                         "delete the volume with `launch.py down --delete-volume` to start in another data center.")
+    for dc in ranked_datacenters(rp, gpu_types(cfg), exclude=vol["dataCenter"])[:4]:
+        log(f"volume '{vol.get('name')}' is empty -> moving it to {dc}, which lists stock")
+        if not delete_volume_when_free(rp, vol["id"]):
+            break
+        save_state(volume_id=None)
+        vol = rp.create_volume(cfg["VOLUME_NAME"], int(cfg["VOLUME_SIZE_GB"]), dc)
+        vol.setdefault("dataCenter", dc)
+        vol.setdefault("name", cfg["VOLUME_NAME"])
+        vol["_known"] = True
+        save_state(volume_id=vol["id"], data_center=dc)
+        pod = try_pod_in(rp, cfg, vol)
+        if pod:
+            return pod, vol
+    raise SystemExit("No GPU capacity found for any GPU type / data center right now. Runpod stock changes by the "
+                     "minute: retry in a few minutes, or widen GPU_FALLBACK_TYPES. "
+                     f"(volume '{cfg['VOLUME_NAME']}' is in {vol['dataCenter']})")
 
 
 class Follower:
@@ -475,8 +582,10 @@ def cmd_run(rp: Runpod, cfg: dict, args) -> int:
         return 0
     vol = ensure_volume(rp, cfg)
     save_state(volume_id=vol["id"], volume_name=cfg["VOLUME_NAME"], data_center=vol["dataCenter"])
-    pod = create_pod(rp, cfg, vol)
-    save_state(pod_id=pod["id"], started=time.strftime("%Y-%m-%dT%H:%M:%S"), run_mode=cfg["RUN_MODE"])
+    pod, vol = create_pod(rp, cfg, vol)
+    used = sorted(set(load_state().get("used_volumes") or []) | {vol["id"]})
+    save_state(pod_id=pod["id"], started=time.strftime("%Y-%m-%dT%H:%M:%S"), run_mode=cfg["RUN_MODE"],
+               volume_id=vol["id"], data_center=vol["dataCenter"], used_volumes=used)
     log(f"console: https://www.runpod.io/console/pods  ·  copilot (serve mode): "
         f"https://{pod['id']}-{COPILOT_PORT}.proxy.runpod.net")
     log(f"mode={cfg['RUN_MODE']}  max={cfg['MAX_HOURS']}h  — Ctrl-C terminates the pod")
