@@ -21,7 +21,7 @@
 #   WITH_SIM_TRANSFER=1  also download nvidia/Cosmos3-Nano-Sim-Transfer (real-time sim2real, ~31 GB)
 #   WITH_ANOMALYGEN=1    also download nvidia/Cosmos-AnomalyGen-Metal-Nano (defect LoRA)
 #   CURATOR_MODELS=transnetv2,qwen3_8_27b_fp8,cosmos_embed1_336p
-#   PYTHON_VERSION=3.12  MINIO_VERSION=latest  MOSAICOD_IMAGE=ghcr.io/mosaico-labs/mosaicod:latest
+#   PYTHON_VERSION=3.12  MINIO_VERSION=latest  MINIO_IMAGE=cgr.dev/chainguard/minio:latest  MOSAICOD_IMAGE=ghcr.io/mosaico-labs/mosaicod:latest
 #   MOSAICO_REF=v0.7.0   git tag for the source-build fallback (default: latest release tag, matching PyPI mosaicolabs)
 set -Eeuo pipefail
 
@@ -212,8 +212,23 @@ install_go() {
   curl -fsSL "https://go.dev/dl/${v}.linux-amd64.tar.gz" | tar -xz -C "${WS}"
 }
 
+# Fast path: lift the (static Go) binary out of a maintained MinIO image, the same image
+# infra/docker-compose.yml uses. Only kept if it actually runs here.
+minio_from_image() {
+  install_crane || return 1
+  local tmp img="${MINIO_IMAGE:-cgr.dev/chainguard/minio:latest}"; tmp="$(mktemp -d)"
+  if "${BIN_DIR}/crane" export --platform linux/amd64 "$img" - | tar -xf - -C "$tmp" usr/bin/minio 2>/dev/null \
+     && "${tmp}/usr/bin/minio" --version >/dev/null 2>&1; then
+    install -m 755 "${tmp}/usr/bin/minio" "${BIN_DIR}/minio"; ok "minio extracted from ${img}"
+  else
+    warn "could not use the minio binary from ${img} — building from source"
+  fi
+  rm -rf "$tmp"
+}
+
 install_minio() {
   hdr "4/9 MinIO (S3 for Cosmos Curator video-cut)"
+  if [[ ! -x "${BIN_DIR}/minio" ]]; then minio_from_image || true; fi
   if [[ -x "${BIN_DIR}/minio" ]]; then ok "minio present"; else
     # MinIO community edition stopped publishing binaries/images (dl.min.io returns 410);
     # the documented path is `go install github.com/minio/minio@latest`.

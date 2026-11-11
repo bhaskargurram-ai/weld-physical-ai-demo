@@ -166,8 +166,9 @@ bash runpod/bootstrap.sh               # idempotent: re-run any time
 3. **Postgres**: cluster in `/workspace/pgdata`, database `mosaico`, random password in
    `/workspace/.weldworld/secrets.env`. If the volume filesystem refuses `chmod 700`, the cluster moves to the
    container disk instead. The catalog is cheap to rebuild with `make ingest`.
-4. **MinIO**: the community edition is now source-only (`dl.min.io` returns HTTP 410), so bootstrap installs Go
-   and runs `go install github.com/minio/minio@latest` into `/workspace/bin`. It uses random root credentials and
+4. **MinIO**: the community edition is now source-only (`dl.min.io` returns HTTP 410). Bootstrap first extracts
+   the binary from `cgr.dev/chainguard/minio` with `crane` and keeps it only if it runs. Otherwise it installs Go and runs
+   `go install github.com/minio/minio@latest` into `/workspace/bin` (about 2 minutes). It uses random root credentials and
    writes `~/.aws/credentials` (with `endpoint_url`) for Curator.
 5. **mosaicod**: tries, in order, the static musl binary from the GitHub release (`mosaicod-linux-amd64.tar.gz`,
    sha256-checked), then `crane export ghcr.io/mosaico-labs/mosaicod:latest`, which pulls `/usr/local/bin/mosaicod`

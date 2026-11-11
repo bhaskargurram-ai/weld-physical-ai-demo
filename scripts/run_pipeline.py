@@ -169,7 +169,7 @@ def make_stages(a: argparse.Namespace) -> list[Stage]:
     def b_ingest(a, py, m):
         flag = first_flag(py, m, "--input", "--in", "--src")
         base = [flag, str(gen)] if flag else [str(gen)]
-        return base + (["--replace"] if a.replace and first_flag(py, m, "--replace") else [])
+        return base + (["--no-replace"] if a.no_replace and first_flag(py, m, "--no-replace") else [])
 
     def b_export(a, py, m):
         return (["--out", str(exp)]
@@ -255,7 +255,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--offline", action="store_true", help="MOSAICO_OFFLINE=1: skip ingest, read data/generated")
     p.add_argument("--replay", action="store_true", help="COSMOS_BACKEND=replay: no GPU / network for world models")
     p.add_argument("--strict", action="store_true", help="fail instead of falling back to offline when mosaicod is down")
-    p.add_argument("--replace", action="store_true", help="re-ingest sequences that already exist in Mosaico")
+    p.add_argument("--no-replace", action="store_true", help="skip sequences that already exist in Mosaico")
     p.add_argument("--warm-limit", type=int, default=int(os.environ.get("WARM_LIMIT", 12)),
                    help="max clips to pre-assess in warm-cache")
     p.add_argument("--warm-preset", default=os.environ.get("WARM_PRESET", "live"), choices=["smoke", "live", "showcase"],

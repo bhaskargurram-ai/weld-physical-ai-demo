@@ -9,15 +9,15 @@
 #   minio-init      one-shot: creates bucket `raw` (Cosmos Curator Next reads s3://raw/)
 #
 # Image overrides (useful when Docker Hub is rate limited / MinIO images are gated):
-#   POSTGRES_IMAGE  (default postgres:16-alpine;  e.g. public.ecr.aws/docker/library/postgres:16-alpine)
+#   POSTGRES_IMAGE  (default public.ecr.aws/docker/library/postgres:16-alpine = official image, no Hub rate limit)
 #   MOSAICOD_IMAGE  (default ghcr.io/mosaico-labs/mosaicod:latest)
-#   MINIO_IMAGE     (default minio/minio:latest;  e.g. cgr.dev/chainguard/minio:latest)
-#   MC_IMAGE        (default minio/mc:latest)
+#   MINIO_IMAGE     (default cgr.dev/chainguard/minio:latest; or quay.io/minio/minio:<release>)
+#   MC_IMAGE        (default cgr.dev/chainguard/minio-client:latest; or quay.io/minio/mc:<release>)
 name: "weldworld"
 
 services:
   database:
-    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    image: ${POSTGRES_IMAGE:-public.ecr.aws/docker/library/postgres:16-alpine}
     hostname: db
     environment:
       POSTGRES_USER: postgres
@@ -50,8 +50,9 @@ services:
     restart: unless-stopped
 
   minio:
-    image: ${MINIO_IMAGE:-minio/minio:latest}
-    command: server /data --console-address ":9001"
+    image: ${MINIO_IMAGE:-cgr.dev/chainguard/minio:latest}
+    command: ["server", "/data", "--console-address", ":9001"]
+    user: "0:0"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
@@ -62,24 +63,17 @@ services:
       - "127.0.0.1:9001:9001"
     restart: unless-stopped
 
+  # One-shot: create bucket `raw`. Uses MC_HOST_<alias> so it works with shell-less mc images;
+  # restarts until MinIO accepts the request, then exits 0.
   minio-init:
-    image: ${MC_IMAGE:-minio/mc:latest}
+    image: ${MC_IMAGE:-cgr.dev/chainguard/minio-client:latest}
+    entrypoint: ["mc"]
+    command: ["mb", "--ignore-existing", "local/raw"]
+    environment:
+      MC_HOST_local: http://${MINIO_ROOT_USER:-minioadmin}:${MINIO_ROOT_PASSWORD:-minioadmin}@minio:9000
     depends_on:
       - minio
-    entrypoint: >
-      /bin/sh -c "
-      for i in $$(seq 1 30); do
-        mc alias set local http://minio:9000 $${MINIO_ROOT_USER:-minioadmin} $${MINIO_ROOT_PASSWORD:-minioadmin} && break;
-        sleep 1;
-      done;
-      mc mb --ignore-existing local/raw;
-      mc anonymous set download local/raw || true;
-      echo 'bucket raw ready'
-      "
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
-    restart: "no"
+    restart: on-failure
 
 volumes:
   pg-data:

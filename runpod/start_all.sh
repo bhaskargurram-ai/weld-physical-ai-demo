@@ -150,7 +150,7 @@ start_copilot() {
   MOSAICO_HOST="${MOSAICO_HOST:-localhost}" MOSAICO_PORT="$MOSAICO_PORT" \
     start_bg copilot "${VENV_DIR}/bin/uvicorn" copilot.app:app --host 0.0.0.0 --port "$COPILOT_PORT" \
       --app-dir "$REPO_DIR" --proxy-headers --forwarded-allow-ips '*'
-  wait_port "$COPILOT_PORT" 60 copilot || tail -n 20 "${LOG_DIR}/copilot.log" >&2
+  wait_port "$COPILOT_PORT" 180 copilot || tail -n 20 "${LOG_DIR}/copilot.log" >&2
 }
 
 # ================================================================== main
