@@ -12,7 +12,10 @@
 #       CUDA 12.8     : --torch-backend=cu128 vllm==0.19.1 + vllm-cosmos3 plugin
 #   Reasoner, REASONER_ROUTE=native (cookbook: "Native Cosmos3 Reasoner support first appears in
 #       the vLLM v0.23.0 stable release"): vllm>=0.23.0, no plugin, no --hf-overrides.
-#   Generator: vllm-omni from git (cookbook "Option 2: Native venv"; pin with VLLM_OMNI_REF).
+#   Generator: published matching pair vllm==0.32.0 + vllm-omni==0.32.0 (vllm-omni docs, "pre-built wheels";
+#       v0.32.0 ships Cosmos3OmniDiffusersPipeline). vllm-omni is a vLLM plugin: vllm must be installed with
+#       the SAME major.minor, it is not pulled in automatically. Override: VLLM_OMNI_VERSION, or
+#       VLLM_OMNI_REF=<git ref> to build vllm-omni from source on top of vllm==$VLLM_OMNI_VERSION.
 #   Framework: uv 0.11.29 (pinned by the framework's pyproject), uv sync --group cu130-train|cu128-train.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,7 +24,8 @@ source "$HERE/common.sh"
 
 CUDA_TAG="$(detect_cuda_tag)"
 REASONER_ROUTE="${REASONER_ROUTE:-plugin}"
-VLLM_OMNI_REF="${VLLM_OMNI_REF:-main}"
+VLLM_OMNI_VERSION="${VLLM_OMNI_VERSION:-0.32.0}"
+VLLM_OMNI_REF="${VLLM_OMNI_REF:-}"
 COSMOS_FRAMEWORK_REF="${COSMOS_FRAMEWORK_REF:-main}"
 PY="${COSMOS_PYTHON:-3.13}"
 echo "== Cosmos 3 install: CUDA tag=$CUDA_TAG reasoner route=$REASONER_ROUTE home=$COSMOS_HOME"
@@ -51,15 +55,24 @@ fi
 
 # --- Generator: vLLM-Omni ---------------------------------------------------------------
 if [ "${INSTALL_GENERATOR:-1}" = "1" ]; then
-  echo "== Generator venv: $OMNI_VENV (vllm-omni@$VLLM_OMNI_REF)"
+  if [ -n "$VLLM_OMNI_REF" ]; then OMNI_SPEC="vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@${VLLM_OMNI_REF}"
+  else OMNI_SPEC="vllm-omni==${VLLM_OMNI_VERSION}"; fi
+  echo "== Generator venv: $OMNI_VENV (vllm==${VLLM_OMNI_VERSION} + ${OMNI_SPEC})"
   ( cd /tmp && uv venv "$OMNI_VENV" --python "$PY" --seed --managed-python --allow-existing --no-config )
+  # one resolve for both, so pip cannot pick a vllm-omni that needs a different vllm
   uv pip install --no-config --python "$OMNI_VENV/bin/python" --torch-backend="$CUDA_TAG" \
-    "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@${VLLM_OMNI_REF}"
+    "vllm==${VLLM_OMNI_VERSION}" "$OMNI_SPEC"
   if [ "${COSMOS_GUARDRAILS:-0}" = "1" ]; then
     # only needed with guardrails ON (gated nvidia/Cosmos-1.0-Guardrail + HF_TOKEN with access)
     uv pip install --no-config --python "$OMNI_VENV/bin/python" cosmos-guardrail
   fi
-  "$OMNI_VENV/bin/python" -c "import vllm_omni; print('vllm_omni ok')"
+  "$OMNI_VENV/bin/python" - <<'PY'
+import vllm, vllm_omni
+from importlib.metadata import version
+v, o = version("vllm"), version("vllm-omni")
+assert v.split(".")[:2] == o.split(".")[:2], f"vllm {v} / vllm-omni {o} major.minor mismatch"
+print(f"vllm {v} + vllm-omni {o} ok")
+PY
 fi
 
 # --- Weights (shared by reasoner and generator) --------------------------------------------

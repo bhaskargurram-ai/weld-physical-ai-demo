@@ -417,9 +417,21 @@ install_worldmodels() {
   local inst="${REPO_DIR}/worldmodels/serve/install.sh"
   if [[ ! -f "$inst" ]]; then warn "worldmodels/serve/install.sh not found — skipping"; return; fi
   if [[ "$(gpu_count)" -eq 0 ]]; then warn "no GPU — skipping (use COSMOS_BACKEND=replay or nim)"; return; fi
-  COSMOS_CUDA_TAG="$(cuda_flavor)" COSMOS_HOME="${COSMOS_HOME:-${WS}/cosmos}" HF_HOME="$HF_HOME" \
-    INSTALL_ANOMALYGEN="${WITH_ANOMALYGEN:-0}" bash "$inst"
-  ok "worldmodels serving stack installed (CUDA_FLAVOR=$(cuda_flavor))"
+  # Reasoner and Generator install separately: one failing must not take the other (or the run) down.
+  local part ok_parts=()
+  for part in REASONER GENERATOR; do
+    local want_r=0 want_g=0
+    [[ $part == REASONER ]] && want_r=1
+    [[ $part == GENERATOR ]] && want_g=1
+    if env COSMOS_CUDA_TAG="$(cuda_flavor)" COSMOS_HOME="${COSMOS_HOME:-${WS}/cosmos}" HF_HOME="$HF_HOME" \
+        INSTALL_REASONER="$want_r" INSTALL_GENERATOR="$want_g" \
+        PREFETCH_WEIGHTS=0 INSTALL_ANOMALYGEN="${WITH_ANOMALYGEN:-0}" bash "$inst"; then
+      ok_parts+=("$part")
+    else
+      warn "Cosmos 3 ${part,,} install failed — the copilot uses cache/nim/replay for it (see log above)"
+    fi
+  done
+  ok "worldmodels serving stack: ${ok_parts[*]:-none} installed (CUDA_FLAVOR=$(cuda_flavor))"
 }
 
 # Container-disk links that a pod restart wipes (targets live on /workspace).
@@ -431,6 +443,10 @@ restore_links() {
     mkdir -p "${HOME}/.config"; ln -sfn "${STATE_DIR}/cosmos_curator" "${HOME}/.config/cosmos_curator"
   fi
   if [[ -d "${CURATOR_WS}" && ( ! -e /config || -L /config ) ]]; then ln -sfn "${CURATOR_WS}" /config; fi
+  if [[ -f "${STATE_DIR}/cosmos_curator/config.yaml" ]]; then
+    mkdir -p /cosmos_curator/config
+    ln -sfn "${STATE_DIR}/cosmos_curator/config.yaml" /cosmos_curator/config/cosmos_curator.yaml
+  fi
 }
 
 # ================================================================== main

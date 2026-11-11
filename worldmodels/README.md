@@ -151,7 +151,9 @@ measure with `python -m worldmodels.serve.healthcheck` (prints per-GPU memory).
   `healthcheck --nim-probe` sends `{}` (422 = route live, plain 404 = not provisioned). Hosted reasoner
   (`integrate.api.nvidia.com/v1`, `nvidia/cosmos3-nano-reasoner`) is taken from the NGC spec; not call-tested (no key here).
 - No GPU here: no request was run against a real Cosmos server; tests use a fake OpenAI/vLLM-Omni/NIM server.
-- `vllm-omni` native install tracks `main` (docs give no release pin); pin `VLLM_OMNI_REF` to the commit you validate.
+- Generator install pins the published matching pair `vllm==0.32.0` + `vllm-omni==0.32.0` (v0.32.0 includes
+  `Cosmos3OmniDiffusersPipeline`). vllm-omni is a vLLM plugin and does **not** pull vllm in itself; `main` needs a
+  pre-release vLLM 0.33.0 wheel. Override with `VLLM_OMNI_VERSION`, or `VLLM_OMNI_REF=<git ref>` to build from source.
   The docs' recommended route is the `vllm/vllm-omni:cosmos3` Docker image, which RunPod cannot run inside a pod
   (use it as the pod image instead if the native install misbehaves).
 - `control_reference` upload (`COSMOS_GENERATOR_SHARED_FS=0`) and per-control `control_weight` are documented for
