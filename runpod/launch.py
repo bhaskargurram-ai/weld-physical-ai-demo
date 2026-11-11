@@ -470,7 +470,7 @@ class Follower:
         except ValueError:
             text, src = payload, ""
         if src == "system":
-            print(f"\033[2m  [runpod] {text}\033[0m", flush=True)
+            self._system(text)
             return
         if text.startswith("WELDWORLD"):
             print(f"\033[1m{text}\033[0m", flush=True)
@@ -482,6 +482,26 @@ class Follower:
                 self._finish("run finished", int(m.group(1)))
         else:
             print(f"  {text}", flush=True)
+
+    _PULL = re.compile(r"^[0-9a-f]{12} (Extracting|Downloading|Waiting|Verifying Checksum|Download complete|"
+                       r"Pulling fs layer|Already exists|Pull complete)")
+
+    def _system(self, text: str) -> None:
+        """Runpod system log: fold Docker's per-layer pull chatter into a progress line every 30 s."""
+        m = self._PULL.match(text)
+        if m:
+            if m.group(1) == "Pull complete":
+                self.layers_done = getattr(self, "layers_done", 0) + 1
+            now = time.time()
+            if now - getattr(self, "_last_pull_note", 0) > 30:
+                self._last_pull_note = now
+                print(f"\033[2m  [runpod] pulling container image... {getattr(self, 'layers_done', 0)} layers done\033[0m",
+                      flush=True)
+            return
+        if text == getattr(self, "_last_system", None):
+            return
+        self._last_system = text
+        print(f"\033[2m  [runpod] {text}\033[0m", flush=True)
 
     def _poll(self) -> None:
         while not self.done.wait(30):

@@ -158,13 +158,15 @@ init_postgres() {
   [[ -n "$pgbin" ]] || die "postgresql binaries not found (apt step skipped?)"
   local pgdata="${PGDATA:-$PGDATA_DEFAULT}"
   if [[ ! -s "${pgdata}/PG_VERSION" ]]; then
+    # a brand-new (empty) catalog: drop Mosaico files left by an earlier pod so catalog and store match
+    rm -rf "${MOSAICO_STORE_DIR:?}"/* 2>/dev/null || true
     mkdir -p "$pgdata"
     chown -R postgres:postgres "$pgdata" 2>/dev/null || true
     chmod 700 "$pgdata" 2>/dev/null || true
     if ! su postgres -c "${pgbin}/initdb -D '${pgdata}' -U postgres --auth-local=trust --auth-host=scram-sha-256 -E UTF8" >/dev/null; then
-      # Some network-volume filesystems refuse chown/chmod 700. Fall back to container disk:
-      # the Mosaico catalog is cheap to rebuild (`make ingest`), raw data stays on /workspace.
-      warn "initdb on ${pgdata} failed — falling back to /var/lib/postgresql/weldworld (NOT persistent)"
+      # Runpod network volumes refuse the 0700 permissions Postgres insists on. Keep the catalog on the
+      # container disk; the pipeline re-ingests the simulated passes every run (~1-2 min).
+      log "network volume cannot host Postgres (permissions) -> catalog on container disk"
       pgdata="/var/lib/postgresql/weldworld"
       mkdir -p "$pgdata"; chown -R postgres:postgres "$pgdata"; chmod 700 "$pgdata"
       su postgres -c "${pgbin}/initdb -D '${pgdata}' -U postgres --auth-local=trust --auth-host=scram-sha-256 -E UTF8" >/dev/null
@@ -372,6 +374,10 @@ huggingface:
 EOF
   umask 022
   ln -sfn "${STATE_DIR}/cosmos_curator" "${HOME}/.config/cosmos_curator"
+  # ...but Curator's own loader (model-download, pipelines) only reads the in-container path
+  # /cosmos_curator/config/cosmos_curator.yaml (cosmos_curator/core/utils/environment.py)
+  mkdir -p /cosmos_curator/config
+  ln -sfn "${STATE_DIR}/cosmos_curator/config.yaml" /cosmos_curator/config/cosmos_curator.yaml
   # Curator resolves weights at /config/models/<model_id> (CONTAINER_PATHS_DEFAULT_WORKSPACE_DIR)
   mkdir -p "${CURATOR_WS}/models"
   if [[ ! -e /config || -L /config ]]; then ln -sfn "${CURATOR_WS}" /config; else warn "/config exists and is not a symlink"; fi

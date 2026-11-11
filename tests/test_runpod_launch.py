@@ -243,3 +243,16 @@ def test_untracked_volume_is_never_moved(env_file, monkeypatch):
     with pytest.raises(SystemExit):
         launch.main(["run", "--env-file", str(env_file)])
     assert not any(m == "DELETE" for m, _, _ in api.calls)
+
+
+def test_image_pull_chatter_is_folded(capsys):
+    f = launch.Follower(None, "p", 0)
+    for _ in range(50):
+        f._handle(json.dumps({"source": "system", "line": "949eeaaa4698 Extracting"}))
+    f._handle(json.dumps({"source": "system", "line": "949eeaaa4698 Pull complete"}))
+    for _ in range(3):
+        f._handle(json.dumps({"source": "system", "line": "create container: still fetching image x"}))
+    f._handle(json.dumps({"source": "system", "line": "Network volume v mounted at /workspace (read-write)"}))
+    out = capsys.readouterr().out
+    assert out.count("Extracting") == 0 and out.count("pulling container image") == 1
+    assert out.count("still fetching image") == 1 and "mounted at /workspace" in out
