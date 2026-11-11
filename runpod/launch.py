@@ -108,6 +108,8 @@ def parse_env_file(path: Path) -> dict[str, str]:
             q = val[0]
             end = val.find(q, 1)
             val = val[1:end] if end > 0 else val[1:]
+        elif val.startswith("#"):
+            val = ""  # `KEY=   # comment` means empty
         else:
             val = re.split(r"\s+#", val, maxsplit=1)[0].strip()
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):

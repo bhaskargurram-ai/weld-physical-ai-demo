@@ -102,6 +102,9 @@ def test_example_env_parses_and_has_required_keys():
     for k in ("RUNPOD_API_KEY", "HF_TOKEN", "ANTHROPIC_API_KEY", "GPU_TYPE", "VOLUME_NAME", "RUN_MODE"):
         assert k in cfg
     assert cfg["GPU_TYPE"] == "NVIDIA H100 80GB HBM3"
+    # empty keys followed by a comment stay empty
+    assert cfg["RUNPOD_API_KEY"] == cfg["HF_TOKEN"] == cfg["COPILOT_LLM"] == ""
+    assert cfg["SERVE_HOURS"] == "2" and cfg["DELETE_VOLUME_AT_END"] == "0"
 
 
 def test_pick_datacenter_prefers_stock_and_volume_support():
