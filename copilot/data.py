@@ -24,6 +24,8 @@ from . import config
 log = logging.getLogger("copilot.data")
 
 SIGNALS = ["current_a", "voltage_v", "travel_speed_mmps", "wfs_mpm", "gas_lpm", "heat_input_kj_mm", "interpass_c"]
+WPS_WINDOW_S = {"travel_speed_mmps": 1.0, "heat_input_kj_mm": 1.0, "interpass_c": 1.0}
+WPS_DEADBAND = 0.01
 SIGNAL_INFO = {
     "current_a": {"label": "Current", "unit": "A"},
     "voltage_v": {"label": "Voltage", "unit": "V"},
@@ -111,7 +113,7 @@ def _normalize_row(m: dict) -> dict:
         "has_defect": bool(has_defect),
         "defect_types": defect_types,
         "defects": [d for d in defects if isinstance(d, dict)],
-        "started_at": m.get("started_at"),
+        "started_at": m.get("started_at") or m.get("start_time_utc"),
     }
     return row
 
@@ -236,7 +238,7 @@ class DataLayer:
     def _local_signals(self, seq: str) -> pd.DataFrame:
         d = self.pass_dir(seq)
         arc = pd.read_parquet(d / "arc.parquet").sort_values("t_ns")
-        t0 = int(arc["t_ns"].iloc[0])
+        t0 = int(self.get_meta(seq).get("t0_ns") or arc["t_ns"].iloc[0])
         base = arc.copy()
         for name in ("travel", "thermal"):
             p = d / f"{name}.parquet"
@@ -278,16 +280,26 @@ class DataLayer:
         df = self.get_signals(seq)
         lim = self.wps_limits(seq)
         hz = 1.0 / max(np.median(np.diff(df["t_s"].values[:200])), 1e-3)
+        # arc-on window from events (skip 1 s start transient and the arc-stop crater fill)
+        ev = self.events(seq)
+        starts = [e["t_s"] for e in ev if e.get("type") == "arc_start"]
+        stops = [e["t_s"] for e in ev if e.get("type") == "arc_stop"]
+        t_on = (min(starts) if starts else float(df["t_s"].iloc[0])) + 1.0
+        t_off = (max(stops) if stops else float(df["t_s"].iloc[-1])) - 0.6
         out = []
         for param, (lo, hi) in lim.items():
             if param not in df.columns:
                 continue
-            x = df[param].rolling(max(int(hz * 0.2), 1), center=True, min_periods=1).median().values
+            # monitor value: 0.5 s moving average (1 s for travel/heat input to remove torch weave),
+            # 1 % deadband on the limit, ignore the first second after arc start (start transient)
+            win = WPS_WINDOW_S.get(param, 0.5)
+            x = df[param].rolling(max(int(hz * win), 1), center=True, min_periods=1).mean().values
             bad = np.zeros(len(x), bool)
             if lo is not None:
-                bad |= x < lo
+                bad |= x < lo - abs(lo) * WPS_DEADBAND
             if hi is not None:
-                bad |= x > hi
+                bad |= x > hi + abs(hi) * WPS_DEADBAND
+            bad &= (df["t_s"].values >= t_on) & (df["t_s"].values <= t_off)
             # close short gaps (<0.3 s), drop blips (<0.25 s)
             idx = np.flatnonzero(np.diff(np.concatenate([[0], bad.astype(int), [0]])))
             runs = list(zip(idx[::2], idx[1::2]))
@@ -298,7 +310,7 @@ class DataLayer:
                 else:
                     merged.append([a, b])
             for a, b in merged:
-                if (b - a) / hz < 0.25:
+                if (b - a) / hz < 0.4:
                     continue
                 seg = x[a:b]
                 worst = float(seg.max() if hi is not None and seg.max() > hi else seg.min())
@@ -337,7 +349,7 @@ class DataLayer:
             t0 = None
             arc = self.pass_dir(seq) / "arc.parquet"
             if arc.exists():
-                t0 = int(pd.read_parquet(arc, columns=["t_ns"])["t_ns"].min())
+                t0 = int(self.get_meta(seq).get("t0_ns") or pd.read_parquet(arc, columns=["t_ns"])["t_ns"].min())
             if t0 is None and raw:
                 t0 = min(e.get("t_ns", 0) for e in raw)
             for e in raw:

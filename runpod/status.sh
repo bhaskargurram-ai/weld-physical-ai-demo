@@ -12,7 +12,7 @@ row() {  # row <name> <port> [health-url]
   elif [[ -f "$(pidfile "$name")" ]]; then proc="${C_R}dead${C_0}"; fi
   if port_open "$port"; then listen="${C_G}:${port}${C_0}"; else listen="${C_Y}:${port} closed${C_0}"; fi
   if [[ -n "$url" ]]; then
-    if curl -fsS -m 3 -o /dev/null "$url"; then health="${C_G}healthy${C_0}"; else health="${C_Y}not ready${C_0}"; fi
+    if curl -fsS -m 3 -o /dev/null "$url" 2>/dev/null; then health="${C_G}healthy${C_0}"; else health="${C_Y}not ready${C_0}"; fi
   fi
   printf '  %-11s %-22s %-24s %s\n' "$name" "$proc" "$listen" "$health"
 }

@@ -292,7 +292,8 @@ class ScriptedAgent(BaseAgent):
                 d = results[[n for n, _, _ in results].index("dataset_stats")][1].get("defect")
                 if d:
                     parts.append(f"We have **{r['kept']} curated {d.replace('_', ' ')} clips** kept for training "
-                                 f"({r['total']} before filtering, {r['rejected']} rejected) from {r['sequences']} passes.")
+                                 f"({r['total']} before filtering, {r['rejected']} rejected) from {r['sequences']} "
+                                 f"pass{'es' if r['sequences'] != 1 else ''}.")
                 else:
                     parts.append(f"Curated dataset: **{r['kept']} of {r['total']} clips kept** from {r['sequences']} passes.")
                     top = sorted(r["by_defect"].items(), key=lambda kv: -kv[1]["kept"])[:6]

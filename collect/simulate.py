@@ -229,7 +229,8 @@ def simulate_pass(pp: PassPlan, seed: int, t0_ns: int, interpass_start_c: float,
     hi = heat_input_kj_mm(I_set, V_set, TS_set)
     target = hi_lo + (hi_hi - hi_lo) * rng.uniform(0.3, 0.55)
     if not (hi_lo + 0.12 * (hi_hi - hi_lo) < hi < hi_hi - 0.2 * (hi_hi - hi_lo)):
-        TS_set = float(np.clip(TS_set * hi / target, *wps.travel_speed_mmps))
+        ts_lo, ts_hi = wps.travel_speed_mmps
+        TS_set = float(np.clip(TS_set * hi / target, ts_lo + 0.12 * (ts_hi - ts_lo), ts_hi - 0.12 * (ts_hi - ts_lo)))
 
     # ---- arc on/off envelope
     arc_off_t = D - 0.4

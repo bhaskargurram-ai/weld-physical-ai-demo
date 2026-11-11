@@ -41,7 +41,7 @@
       <div class="kpis" id="floorKpis"></div>
       <div class="filters">
         <div class="seg full" id="fProcess">
-          <button data-v="" class="on">All processes</button><button data-v="GTAW">GTAW</button><button data-v="FCAW">FCAW</button>
+          <button data-v="" class="on">All</button>
         </div>
         <div class="frow">
           <select id="fSpool" aria-label="Spool"><option value="">All spools</option></select>
@@ -142,6 +142,9 @@
       </div>
       <label class="fld">Cosmos-3 prompt (JSON, editable)<textarea id="genPrompt" rows="10" spellcheck="false"></textarea></label>
       <button class="btn primary big" id="genGo">Generate</button>
+      <div class="gen-note"><b>What-if</b> → Cosmos 3 Generator, image-to-video from the pass frame at the clip centre.
+        <b>Sim → Real</b> → Cosmos 3 Transfer, conditioned on the simulator's edge/depth control video (same timing, so labels carry over).
+        Renders run as background jobs; results are cached so a rehearsal populates <code>REPLAY</code> mode.</div>
       <div class="jobs" id="genJobs"></div>
     </aside>
     <section class="panel gen-main">

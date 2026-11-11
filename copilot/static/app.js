@@ -88,7 +88,11 @@ function pulseStage(id, ms = 2500) {
 async function loadPasses() {
   const r = await api("/api/passes");
   S.passes = r.passes;
-  $("#floorSource").textContent = `Cell 2 · ${r.source === "mosaico_io" ? "Mosaico" : "offline"}`;
+  const cells = [...new Set(S.passes.map((p) => p.cell_id).filter(Boolean))];
+  $("#floorSource").textContent = `${cells.join(", ") || "Cell"} · ${r.source === "mosaico_io" ? "via mosaico_io" : "local files"}`;
+  const procs = [...new Set(S.passes.map((p) => p.process).filter(Boolean))].sort();
+  $("#fProcess").innerHTML = "";
+  ["", ...procs].forEach((v) => $("#fProcess").append(h("button", { "data-v": v, class: v === S.filters.process ? "on" : "" }, v || "All")));
   const spools = [...new Set(S.passes.map((p) => p.spool_id))].sort();
   const sel = $("#fSpool");
   sel.innerHTML = '<option value="">All spools</option>' + spools.map((s) => `<option>${esc(s)}</option>`).join("");
@@ -198,7 +202,8 @@ function setView(view, force = false) {
       src = s2r.control_url || media.edge || media.torch;
       S.offset = s2r.t0_s || 0;
       $("#capMain").textContent = `SIMULATOR · ${(s2r.control_kind || "edge").toUpperCase()} CONTROL`;
-      $("#capSecond").textContent = `COSMOS 3 TRANSFER · ${s2r.placeholder ? "PLACEHOLDER" : (s2r.source || "").toUpperCase()}`;
+      const sn = String(s2r.source || "");
+      $("#capSecond").textContent = `COSMOS 3 TRANSFER · ${sn.includes("mock") ? "MOCK" : sn.includes("heuristic") ? "PLACEHOLDER" : sn.toUpperCase()}`;
       vSecond.src = s2r.video_url;
       vMain.loop = vSecond.loop = true;
     }
@@ -207,8 +212,9 @@ function setView(view, force = false) {
   $("#stageEmpty").classList.toggle("hidden", !!src);
   if (src) {
     if (vMain.getAttribute("src") !== src) { vMain.src = src; vMain.load(); }
-    vMain.addEventListener("loadedmetadata", () => seek(Math.max(t, S.offset)), { once: true });
-  } else vMain.removeAttribute("src");
+    S.pendingSeek = null;
+    vMain.addEventListener("loadedmetadata", () => seek(Math.max(S.pendingSeek ?? t, S.offset)), { once: true });
+  } else { vMain.removeAttribute("src"); vMain.load(); S.vt = t; tick(true); }
 }
 $("#viewToggle").addEventListener("click", (e) => { if (e.target.dataset.view) setView(e.target.dataset.view); });
 $("#s2rGo").onclick = () => {
@@ -216,13 +222,17 @@ $("#s2rGo").onclick = () => {
   sendChat(`Make photoreal training video from the simulator for ${S.seq}`);
 };
 
-function currentT() { return (vMain.currentTime || 0) + S.offset; }
+// virtual clock when a pass has no video (signals-only replay)
+S.vt = 0; S.vplay = false; S.vlast = 0;
+function currentT() { return vMain.getAttribute("src") ? (vMain.currentTime || 0) + S.offset : S.vt; }
 function seek(t) {
   t = Math.max(0, Math.min(t, S.dur || t));
   if (S.view === "sim2real" && S.detail?.sim2real) {
     const s = S.detail.sim2real;
     if (t < s.t0_s || t > s.t1_s) { setView("torch"); }
   }
+  S.vt = t;
+  if (vMain.getAttribute("src") && vMain.readyState < 1) S.pendingSeek = t;
   const local = t - S.offset;
   if (vMain.src) { try { vMain.currentTime = Math.max(0, local); } catch { /* not ready */ } }
   if (!vSecond.classList.contains("hidden") && vSecond.src) { try { vSecond.currentTime = Math.max(0, local); } catch { /* */ } }
@@ -230,7 +240,11 @@ function seek(t) {
   tick(true);
 }
 function togglePlay() {
-  if (!vMain.src) return;
+  if (!vMain.getAttribute("src")) {
+    S.vplay = !S.vplay; S.vlast = performance.now();
+    $("#btnPlay").innerHTML = S.vplay ? '<svg viewBox="0 0 24 24"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
+    return;
+  }
   if (vMain.paused) { vMain.play(); if (vSecond.src) vSecond.play(); } else { vMain.pause(); vSecond.pause(); }
 }
 $("#btnPlay").onclick = togglePlay;
@@ -269,8 +283,10 @@ $("#timeline").addEventListener("click", (e) => {
 
 /* signal charts */
 function yRange(arr, lim) {
-  let lo = Infinity, hi = -Infinity;
-  for (const v of arr) if (v != null) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  // robust range (0.5-99.5 percentile) so arc-off zeros / single spikes don't flatten the trace
+  const vals = arr.filter((v) => v != null).sort((a, b) => a - b);
+  let lo = vals.length ? vals[Math.floor(vals.length * 0.005)] : Infinity;
+  let hi = vals.length ? vals[Math.min(vals.length - 1, Math.floor(vals.length * 0.995))] : -Infinity;
   if (lim) { if (lim[0] != null) lo = Math.min(lo, lim[0]); if (lim[1] != null) hi = Math.max(hi, lim[1]); }
   if (!isFinite(lo)) return [0, 1];
   const pad = (hi - lo || Math.abs(hi) || 1) * 0.12;
@@ -342,12 +358,13 @@ function buildCharts() {
     box.append(row);
     const el = row.querySelector(".chart-box");
     const data = [sig.t, sig.series[p], outOfSpec(sig.series[p], lim)];
+    const yr = yRange(sig.series[p], lim);
     const opts = {
       width: Math.max(100, el.clientWidth), height: height + (last ? 18 : 0),
       padding: [4, 6, 0, 0],
       cursor: { sync: { key: sync.key }, drag: { x: false, y: false }, points: { show: false }, y: false },
       legend: { show: false },
-      scales: { x: { time: false, auto: false, min: 0, max: S.dur }, y: { range: () => yRange(sig.series[p], lim) } },
+      scales: { x: { time: false, auto: false, min: 0, max: S.dur }, y: { range: () => yr } },
       axes: [
         { show: last, stroke: COL.axis, size: 18, gap: 2, grid: { stroke: COL.grid, width: 1 }, ticks: { show: false }, font: "10px IBM Plex Mono", values: (u, v) => v.map((x) => `${x}s`) },
         { stroke: COL.axis, size: 40, gap: 3, grid: { stroke: COL.grid, width: 1 }, ticks: { show: false }, font: "10px IBM Plex Mono", splits: (u) => { const [a, b] = u.scales.y.range ? [u.scales.y.min, u.scales.y.max] : [0, 1]; return [a + (b - a) * 0.2, a + (b - a) * 0.8]; }, values: (u, v) => v.map((x) => fmt(x, SIG[p].d)) },
@@ -395,9 +412,12 @@ function renderHud(t) {
   if (!S.sig) return;
   const i = idxAt(t);
   const hud = $("#hud");
-  hud.innerHTML = CHART_PARAMS.filter((p) => S.sig.series[p]).map((p) => {
+  const cur = S.sig.series.current_a?.[i];
+  const arcOff = cur != null && cur < 5;
+  hud.innerHTML = (arcOff ? '<div class="r"><div class="k"><span>Arc</span></div><div class="v">OFF</div></div>' : "") +
+    CHART_PARAMS.filter((p) => S.sig.series[p]).map((p) => {
     const v = S.sig.series[p][i];
-    const bad = valState(p, v);
+    const bad = !arcOff && valState(p, v);
     return `<div class="r ${bad ? "bad" : ""}"><div class="k"><span>${SIG[p].n}</span><span>${bad ? "OUT OF WPS" : ""}</span></div><div class="v">${fmt(v, SIG[p].d)}<small>${SIG[p].u}</small></div></div>`;
   }).join("");
   const w = (S.detail.defect_windows || []).find((d) => t >= d.t_start && t <= d.t_end);
@@ -421,7 +441,14 @@ function tick(force = false) {
   }
   renderHud(t);
 }
-(function loop() { if (!vMain.paused) tick(); requestAnimationFrame(loop); })();
+(function loop(now) {
+  if (S.vplay && !vMain.getAttribute("src")) {
+    S.vt += ((now || 0) - S.vlast) / 1000; S.vlast = now || 0;
+    if (S.vt >= S.dur) { S.vt = S.dur; S.vplay = false; }
+    tick();
+  } else if (!vMain.paused) tick();
+  requestAnimationFrame(loop);
+})();
 vMain.addEventListener("seeked", () => tick(true));
 vMain.addEventListener("timeupdate", () => { if (vMain.paused) tick(true); });
 
@@ -575,13 +602,14 @@ function cardChart(c) {
       const vals = c.series[p];
       const bad = outOfSpec(vals, lim).some((v) => v != null);
       const holder = h("div");
+      const yr = yRange(vals, lim);
       const row = h("div", { class: "spark-row" }, h("div", { class: "n" }, SIG[p]?.n || p, h("b", { style: { color: bad ? "#ff8b8b" : "" } }, `${fmt(Math.min(...vals.filter((x) => x != null)), SIG[p]?.d ?? 1)}–${fmt(Math.max(...vals.filter((x) => x != null)), SIG[p]?.d ?? 1)}`)), holder);
       body.append(row);
       const last = i === params.length - 1;
       const u = new uPlot({
         width: Math.max(120, holder.clientWidth), height: 40 + (last ? 16 : 0), padding: [3, 4, 0, 0],
         cursor: { show: true, points: { show: false }, y: false, drag: { x: false, y: false } }, legend: { show: false },
-        scales: { x: { time: false }, y: { range: () => yRange(vals, lim) } },
+        scales: { x: { time: false }, y: { range: () => yr } },
         axes: [{ show: last, stroke: COL.axis, size: 16, gap: 1, grid: { show: false }, ticks: { show: false }, font: "9px IBM Plex Mono", values: (u, v) => v.map((x) => `${x}s`) },
           { show: false }],
         series: [{}, { stroke: COL.arc, width: 1.25 }, { stroke: COL.crit, width: 2 }],
@@ -600,7 +628,7 @@ function cardVerdict(c) {
     h("span", {}, (d.type || "").replace(/_/g, " ")), h("div", { class: "bar" }, h("i", { style: { width: `${Math.round((d.confidence || 0) * 100)}%` } })),
     h("span", { class: "pc" }, `${Math.round((d.confidence || 0) * 100)}%`),
     h("span", { class: "at", title: "Jump replay", onclick: () => selectPass(c.sequence_name, d.t_abs ?? c.t0_s) }, d.t_abs != null ? `@${fmt(d.t_abs)}s` : ""))));
-  const findings = (c.wps_findings || []).map((f) => h("li", {}, f.note || `${f.param}: ${f.value} (WPS ${f.limit_lo ?? "—"}–${f.limit_hi ?? "—"}) ${f.t_start_s != null ? `@ ${fmt(f.t_start_s)}–${fmt(f.t_end_s)} s` : ""}`));
+  const findings = (c.wps_findings || []).filter((f) => !f.status || f.status !== "within").map((f) => h("li", {}, f.note || `${f.param}: ${f.value} (WPS ${f.limit_lo ?? "—"}–${f.limit_hi ?? "—"}) ${f.t_start_s != null ? `@ ${fmt(f.t_start_s)}–${fmt(f.t_end_s)} s` : ""}`));
   const src = String(c.source || "");
   const srcClass = src.includes("heuristic") || src.includes("mock") ? "warn" : src.includes("cache") ? "neutral" : "ok";
   return h("div", { class: "card verdict" },
@@ -724,14 +752,14 @@ async function loadDataset() {
   $("#dsCount").textContent = `${DS.count} clips`;
   const tbl = $("#dsTable");
   tbl.innerHTML = "";
-  tbl.append(h("thead", {}, h("tr", {}, ["Clip", "Defects", "RT", "Status", "Blur", "Caption"].map((x) => h("th", {}, x)))));
+  tbl.append(h("thead", {}, h("tr", {}, ["Clip", "Defects", "RT", "Status", "Caption"].map((x) => h("th", {}, x)))));
   const tb = h("tbody");
   DS.rows.forEach((r, i) => tb.append(h("tr", { class: "click", "data-i": i, onclick: (e) => previewClip(r, e.currentTarget) },
-    h("td", {}, r.clip_id, h("span", { class: "w" }, `${r.sequence_name} · ${fmt(r.t0_s)}–${fmt(r.t1_s)} s`)),
+    h("td", {}, r.clip_id, h("span", { class: "w" }, `${fmt(r.t0_s)}–${fmt(r.t1_s)} s · blur ${fmt(r.quality?.blur, 2)}`)),
     h("td", {}, (r.defects || []).length ? r.defects.map((d) => h("span", { class: "badge reject", style: { marginRight: "3px" } }, d.replace(/_/g, " "))) : h("span", { class: "sub" }, "none")),
     h("td", {}, h("span", { class: `badge ${r.rt_result || "pending"}` }, r.rt_result || "pending")),
     h("td", {}, r.kept ? h("span", { class: "badge ok" }, "kept") : h("span", { class: "badge neutral", title: r.reject_reason }, (r.reject_reason || "rejected").replace(/_/g, " "))),
-    h("td", {}, fmt(r.quality?.blur, 2)), h("td", { class: "cap" }, h("div", {}, r.caption || "")))));
+    h("td", { class: "cap" }, h("div", {}, r.caption || "")))));
   tbl.append(tb);
   if (DS.rows[0] && !$("#dsPreview video")) {
     const i = Math.max(0, DS.rows.findIndex((r) => (r.defects || []).length && r.kept));
@@ -824,8 +852,13 @@ async function loadGallery() {
   const [sug] = await Promise.all([api("/api/suggestions"), loadPasses()]);
   S.demo = sug.demo;
   renderSuggestions();
-  const first = S.passes.find((p) => p.sequence_name === "SP-1043_J07_P3_FCAW") || S.passes.find((p) => p.has_defect) || S.passes[0];
-  if (first) await selectPass(first.sequence_name, 9.5);
+  const first = S.passes.find((p) => p.sequence_name === "SP-1043_J07_P3_FCAW")
+    || S.passes.find((p) => p.has_defect && p.rt_result === "reject") || S.passes[0];
+  if (first) {
+    await selectPass(first.sequence_name);
+    const w = (S.detail.defect_windows || [])[0];
+    seek(w ? Math.max(0, w.t_start - 1.5) : 2);
+  }
   const tab = location.hash.replace("#", "");
   if (["dataset", "generate"].includes(tab)) showTab(tab);
 })();

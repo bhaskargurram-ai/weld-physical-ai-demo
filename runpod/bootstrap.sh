@@ -231,7 +231,7 @@ install_minio() {
 
 create_bucket() {
   # needs minio running (start_all.sh starts it); bucket creation via boto3 from the repo venv
-  "${VENV_DIR}/bin/python" - <<'PY' || warn "bucket creation failed (is MinIO running?)"
+  S3_ENDPOINT="http://localhost:${MINIO_API_PORT}" "${VENV_DIR}/bin/python" - <<'PY' || warn "bucket creation failed (is MinIO running?)"
 import os, boto3, botocore
 s3 = boto3.client("s3", endpoint_url=os.environ.get("S3_ENDPOINT", "http://localhost:9000"),
                   aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
@@ -436,7 +436,7 @@ load_env
 create_bucket
 
 hdr "Done in $(( ($(date +%s) - T0) / 60 )) min"
-df -h "${WS}" | tail -1 | awk '{print "  /workspace: " $3 " used, " $4 " free"}'
+df -h "${WS}" | tail -1 | awk -v ws="${WS}" '{print "  " ws ": " $3 " used, " $4 " free"}'
 cat <<EOF
 
   Next:
