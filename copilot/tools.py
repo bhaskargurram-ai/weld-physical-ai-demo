@@ -434,12 +434,16 @@ def _dt(s: str | None):
 def _parse_ref(text: str) -> dict:
     out: dict = {}
     t = text.upper().replace("_", " ")
-    m = re.search(r"SP[- ]?(\d{3,5})", t)
+    m = re.search(r"\b(SP|V)[- ]?(\d{3,5})", t)
     if m:
-        out["spool"] = f"SP-{m.group(1)}"
+        out["spool"] = f"{m.group(1)}-{m.group(2)}"
     m = re.search(r"\bJ(?:OINT)?[-_ ]?(\d{1,3})\b", t)
     if m:
         out["joint"] = f"J{int(m.group(1)):02d}"
+    else:  # vessel circumferential / longitudinal seams, e.g. CS2, LS1
+        m = re.search(r"\b(CS|LS)[-_ ]?(\d{1,3})\b", t)
+        if m:
+            out["joint"] = f"{m.group(1)}{int(m.group(2))}"
     m = re.search(r"(?:\bP|PASS[-_ ]?)(\d)\b", t)
     if m:
         out["pass_no"] = int(m.group(1))

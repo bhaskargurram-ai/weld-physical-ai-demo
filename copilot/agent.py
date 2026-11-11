@@ -179,9 +179,9 @@ class ScriptedAgent(BaseAgent):
             return [("get_signals_summary", seq_arg or {"sequence": ctx.get("last_sequence")})]
         if re.search(r"list|passes|spool|joint|welds|rt|reject", t):
             args: dict[str, Any] = {}
-            sp = re.search(r"sp[-_ ]?(\d{3,5})", t)
+            sp = re.search(r"\b(sp|v)[-_ ]?(\d{3,5})", t)
             if sp:
-                args["spool_id"] = f"SP-{sp.group(1)}"
+                args["spool_id"] = f"{sp.group(1).upper()}-{sp.group(2)}"
             for pr in ("gtaw", "fcaw", "smaw", "gmaw", "saw"):
                 if re.search(rf"\b{pr}\b", t):
                     args["process"] = pr.upper()
@@ -264,7 +264,10 @@ class ScriptedAgent(BaseAgent):
         if "assess_weld" in by:
             a = by["assess_weld"]
             ds = ", ".join(f"{d['type'].replace('_', ' ')} ({round(100 * d['confidence'])}%)" for d in a.get("defects", []))
-            parts.append(f"\n**Cosmos 3 Reasoner:** {(a.get('verdict') or '').upper()}"
+            src = str(a.get("source") or "")
+            who = ("Cosmos 3 Reasoner" if (src.startswith("cosmos3") or src in ("nim", "cache"))
+                   else "Rule-based check (Cosmos 3 offline)")
+            parts.append(f"\n**{who}:** {(a.get('verdict') or '').upper()}"
                          f"{' — ' + ds if ds else ''} on clip {a.get('t0_s')}–{a.get('t1_s')}s.")
             parts.append(f"**Root cause:** {a.get('root_cause')}")
             parts.append(f"**Action:** {a.get('recommended_action')}")
@@ -325,7 +328,7 @@ def _pname(p: str) -> str:
 
 
 def _extract_ref(text: str) -> str | None:
-    m = re.search(r"SP[-_ ]?\d{3,5}(?:[_ ]+J\d{1,3})?(?:[_ ]+P\d)?(?:[_ ]+(?:GTAW|FCAW|SMAW|GMAW|SAW))?", text, re.I)
+    m = re.search(r"(?:SP|V)[-_ ]?\d{3,5}(?:[_ ]+(?:J|CS)\d{1,3})?(?:[_ ]+P\d)?(?:[_ ]+(?:GTAW|FCAW|SMAW|GMAW|SAW))?", text, re.I)
     if not m:
         return None
     ref = m.group(0)

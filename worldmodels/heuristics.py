@@ -95,7 +95,9 @@ def assess(context: Optional[dict]) -> dict:
         p = str(v.get("param", "?"))
         direction = _violation_direction(v)
         label, unit = SIGNAL_LABELS.get(p, (p, ""))
-        note = f"{label} {v.get('value')} {unit} vs WPS {v.get('limit_lo')}-{v.get('limit_hi')} {unit}".strip()
+        lo, hi = v.get("limit_lo"), v.get("limit_hi")
+        rng = f"≤ {hi}" if lo is None else (f"≥ {lo}" if hi is None else f"{lo}-{hi}")
+        note = f"{label} {v.get('value')} {unit} vs WPS {rng} {unit}".strip()
         findings.append({"param": p, "status": "violation", "note": note})
         hit = _PARAM_CAUSES.get((p, direction))
         if hit:
