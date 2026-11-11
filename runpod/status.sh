@@ -28,7 +28,7 @@ printf '  %-11s %-22s %-24s\n' "postgres" "$pg" ":${PG_PORT}"
 row minio "$MINIO_API_PORT" "http://localhost:${MINIO_API_PORT}/minio/health/live"
 row mosaicod "$MOSAICO_PORT"
 row reasoner "$REASONER_PORT" "http://localhost:${REASONER_PORT}/v1/models"
-row generator "$GENERATOR_PORT" "http://localhost:${GENERATOR_PORT}/v1/models"
+row generator "$GENERATOR_PORT" "http://localhost:${GENERATOR_PORT}/health"
 row copilot "$COPILOT_PORT" "http://localhost:${COPILOT_PORT}/api/health"
 
 hdr "Config"

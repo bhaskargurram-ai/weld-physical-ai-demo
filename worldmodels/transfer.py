@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import cache
-from .config import Settings, get_settings, probe, repo_root, resolve_backend
+from .config import Settings, get_settings, health_url, probe, repo_root, resolve_backend
 from .generate import nim_resolution_key, post_nim, post_omni, run_media, sha_or_none
 from .http import BackendError
 from .prompts import compact, looks_like_json_prompt, negative_prompt, prompt_query_text, weld_scene_prompt
@@ -272,7 +272,7 @@ def nim_transfer_body(req: dict) -> dict:
 def _engine(s: Settings) -> str:
     if s.transfer_backend in ("omni", "framework"):
         return s.transfer_backend
-    if probe(f"{s.generator_api}/models", timeout=s.probe_timeout_s):
+    if probe(health_url("generator", s), timeout=s.probe_timeout_s):
         return "omni"
     return "framework" if framework_available(s) else "omni"
 

@@ -639,3 +639,15 @@ def test_frame_math():
     from worldmodels.video import frames_4k1
     assert frames_4k1(121) == 121 and frames_4k1(120) == 117
     assert re.match(r"^\d+x\d+$", "x".join(map(str, generate.resolve_size("720", generate.PRESETS["live"]))))
+
+
+def test_generator_readiness_uses_health_not_models(monkeypatch):
+    """vLLM-Omni answers /v1/models with 200 + [] while still loading; only /health means ready."""
+    from worldmodels import config as cfgmod
+    monkeypatch.setenv("COSMOS_GENERATOR_URL", "http://localhost:8001")
+    monkeypatch.setenv("COSMOS_REASONER_URL", "http://localhost:8000/v1")
+    s = cfgmod.get_settings()
+    assert cfgmod.health_url("generator", s) == "http://localhost:8001/health"
+    assert cfgmod.health_url("reasoner", s) == "http://localhost:8000/v1/models"
+    monkeypatch.setenv("COSMOS_GENERATOR_URL", "http://localhost:8001/v1")
+    assert cfgmod.health_url("generator", cfgmod.get_settings()) == "http://localhost:8001/health"

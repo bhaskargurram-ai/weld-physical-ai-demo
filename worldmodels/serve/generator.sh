@@ -55,7 +55,7 @@ esac
 [ -n "${GENERATOR_EXTRA_ARGS:-}" ] && ARGS+=(${GENERATOR_EXTRA_ARGS})
 
 echo "Generator: GPU=$CUDA_VISIBLE_DEVICES precision=${GENERATOR_PRECISION:-bf16} offload=${OFFLOAD:-0} port=$PORT"
-echo "Ready when 'Application startup complete.' is logged. Check: curl localhost:$PORT/v1/models"
+echo "Ready when 'curl localhost:$PORT/health' returns 200 (/v1/models answers 200 with an empty list while loading)"
 launch generator "$OMNI_VENV/bin/vllm" serve "$MODEL_ARG" \
   --omni \
   --model-class-name Cosmos3OmniDiffusersPipeline \

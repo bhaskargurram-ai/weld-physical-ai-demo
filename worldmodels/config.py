@@ -210,6 +210,21 @@ def clear_probe_cache() -> None:
     _PROBE_CACHE.clear()
 
 
+def health_url(service: Literal["reasoner", "generator"], settings: Optional[Settings] = None) -> str:
+    """URL that answers 2xx only once the server can actually serve.
+
+    vLLM-Omni (generator) answers ``/v1/models`` with 200 and an empty list while the model is still
+    loading, so it must be probed on ``/health`` (503 until the diffusion engine is up). The reasoner
+    (plain vLLM) only opens its port once loaded, so ``/v1/models`` is fine there.
+    """
+    s = settings or get_settings()
+    if service == "reasoner":
+        return f"{s.reasoner_api}/models"
+    root = s.generator_url.rstrip("/")
+    root = root[:-3] if root.endswith("/v1") else root
+    return f"{root}/health"
+
+
 def resolve_backend(service: Literal["reasoner", "generator"], settings: Optional[Settings] = None) -> Backend:
     """Turn ``auto`` into a concrete backend for one service."""
     s = settings or get_settings()
@@ -218,8 +233,7 @@ def resolve_backend(service: Literal["reasoner", "generator"], settings: Optiona
         raise ValueError(f"invalid backend {choice!r} for {service}")
     if choice != "auto":
         return choice  # type: ignore[return-value]
-    url = s.reasoner_api if service == "reasoner" else s.generator_api
-    if probe(f"{url}/models", timeout=s.probe_timeout_s):
+    if probe(health_url(service, s), timeout=s.probe_timeout_s):
         return "local"
     if s.nvidia_api_key:
         return "nim"

@@ -119,7 +119,7 @@ def test_qwen_chain_validates_and_matches_contract(cfgs_qwen, tmp_path):
     cut = loaded["01-video-cut"]
     assert cut["split"] == {"method": "fixed-stride", "duration_s": 5.0, "stride_s": 5.0, "min_duration_s": 2.0}
     assert cut["input"]["uris"] == ["s3://raw/weldworld/a.mp4", "s3://raw/weldworld/b.mp4"]
-    assert loaded["02-video-transcode"]["transcode"]["video_encoder"] == "libx264"
+    assert loaded["02-video-transcode"]["transcode"]["video_encoder"] == "libopenh264"
     assert loaded["03-video-caption"]["model"]["variant"] == "qwen3_8_27b_fp8"
     assert loaded["04-video-embed"]["model"]["variant"] == "336p"
     roots = {c["input"].get("media_root") or c["output"].get("media_root") for c in loaded.values()}

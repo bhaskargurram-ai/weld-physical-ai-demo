@@ -107,7 +107,9 @@ stage pipeline "$PY" scripts/run_pipeline.py --data-dir "$DATA_DIR" --n-passes "
   --backend "$CURATE_BACKEND" --skip warm-cache --keep-going
 if [[ ! -s "${DATA_DIR}/curated/manifest.jsonl" && "$CURATE_BACKEND" != lite ]]; then
   say "curation with ${CURATE_BACKEND} produced no manifest -> retrying with lite"
-  stage curate-lite "$PY" scripts/run_pipeline.py --data-dir "$DATA_DIR" --only curate --backend lite
+  # a successful fallback recovers the run: the earlier pipeline rc should not fail it
+  stage curate-lite "$PY" scripts/run_pipeline.py --data-dir "$DATA_DIR" --only curate --backend lite \
+    && STATUS=0 && say "recovered: curated with lite (Cosmos Curator failed, see above)"
 fi
 
 # ---------------------------------------------------------------- 4. Cosmos 3 servers + warm cache

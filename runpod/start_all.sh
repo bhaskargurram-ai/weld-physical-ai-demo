@@ -165,7 +165,7 @@ if want models; then
   start_models
   if [[ $WAIT -eq 1 ]]; then
     if is_running reasoner; then wait_http "http://localhost:${REASONER_PORT}/v1/models" "${WAIT_S:-1800}" reasoner || true; fi
-    if is_running generator; then wait_http "http://localhost:${GENERATOR_PORT}/v1/models" "${WAIT_S:-1800}" generator || true; fi
+    if is_running generator; then wait_http "http://localhost:${GENERATOR_PORT}/health" "${WAIT_S:-1800}" generator || true; fi
   else
     log "model servers load in the background (several minutes); check with runpod/status.sh or --wait"
   fi

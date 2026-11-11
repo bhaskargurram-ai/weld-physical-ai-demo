@@ -4,7 +4,7 @@ Chain (one shared ``media_root`` = the curate output dir, so Curator itself writ
 ``<out>/lance`` and ``<out>/clips/<clip_id>.mp4``):
 
   01-video-cut        fixed-stride 5 s spans; input MUST be S3 -> MinIO bucket ``raw``
-  02-video-transcode  libx264
+  02-video-transcode  libopenh264 (Curator's LGPL ffmpeg has no libx264)
   03-video-caption    Qwen3.8-27B (FP8) with Curator's code-owned default prompt
   04-video-embed      Cosmos-Embed1 336p (768-d)
   optional Cosmos 3 captioning with the weld CWI prompt (``--captioner cosmos3_nano``):
@@ -60,7 +60,7 @@ def build_configs(*, media_root: str, input_uris: list[str], clip_s: float = CLI
         "schema_version": 1,
         "kind": "video-transcode",
         "input": {"media_root": root},
-        "transcode": {"video_encoder": "libx264", "video_bitrate": "4M"},
+        "transcode": {"video_encoder": "libopenh264", "video_bitrate": "4M"},
         "execution": {"storage_profile": storage_profile, "transcode_cpus": float(transcode_cpus)},
     }
     if not skip_caption and captioner in CAPTION_VARIANTS_VIDEO:
