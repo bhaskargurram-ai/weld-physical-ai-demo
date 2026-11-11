@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
-from pathlib import Path
 from typing import Any, Optional
 
 from .config import repo_root
@@ -143,8 +142,16 @@ def normalize_context(context: Optional[dict]) -> dict:
     meta = ctx.get("meta") or {}
     if not isinstance(meta, dict):
         meta = {}
+    summary = ctx.get("sensor_summary")
+    stats = ctx.get("signal_stats") or {}
+    if isinstance(summary, dict):
+        # curated manifest: per-signal {mean,std,min,max} dicts next to pass metadata scalars
+        meta = {**{k: v for k, v in summary.items() if not isinstance(v, dict)}, **meta}
+        if not stats:
+            stats = {k: v for k, v in summary.items() if isinstance(v, dict)}
+    elif summary and not stats:
+        stats = summary
     get = lambda k, d=None: ctx.get(k, meta.get(k, d))  # noqa: E731
-    stats = ctx.get("signal_stats") or ctx.get("sensor_summary") or {}
     defects = ctx.get("defects_in_window")
     if defects is None:
         defects = ctx.get("defects")
@@ -355,12 +362,12 @@ def weld_scene_prompt(description: str, *, process: str = "FCAW", pass_type: str
     defect_txt = ""
     if defect and defect != "none":
         defect_txt = {
-            "porosity": "Gas pockets erupt through the weld pool and freeze as small round pores and pinholes in the bead surface.",
-            "lack_of_fusion": "The bead sits on top of the bevel face with a visible cold lap line; the puddle does not wet into the sidewall.",
-            "undercut": "A groove melts into the base metal along the bead toe and is left unfilled.",
-            "burn_through": "The root melts through, leaving a hole with sagging molten metal and an oxidised edge.",
-            "arc_instability": "The arc flickers and wanders, spatter flies, and the bead ripples become irregular.",
-            "crack": "A thin dark crack line opens along the bead centreline as it cools.",
+            "porosity": "Gas pockets erupt through the weld pool and freeze as small round pores and pinholes in the bead surface (porosity).",
+            "lack_of_fusion": "The bead sits on top of the bevel face with a visible cold lap line; the puddle does not wet into the sidewall (lack of fusion).",
+            "undercut": "A groove melts into the base metal along the bead toe and is left unfilled (undercut).",
+            "burn_through": "The root melts through, leaving a hole with sagging molten metal and an oxidised edge (burn-through).",
+            "arc_instability": "The arc flickers and wanders, spatter flies, and the bead ripples become irregular (arc instability).",
+            "crack": "A thin dark crack line opens along the bead centreline as it cools (centreline crack).",
         }.get(defect, f"A {defect.replace('_', ' ')} defect forms in the bead.")
     subject = {
         "description": (f"The {process} {pass_type} pass on a carbon-steel pipe butt joint: bright arc, molten weld "

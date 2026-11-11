@@ -104,7 +104,7 @@ def transfer_key(req: dict) -> tuple[str, str]:
     inputs["negative_sha"] = cache.text_hash(req["negative_prompt"])
     key = cache.make_key(FN_TRANSFER, inputs)
     alias = cache.alias_key(FN_TRANSFER, req["query_text"], {k: sha_or_none(v) for k, v in req["controls"].items()})
-    return key, alias
+    return key, [alias]
 
 
 # ------------------------------------------------------------------ vLLM-Omni
@@ -175,6 +175,7 @@ def framework_spec(req: dict, name: str, prompt_path: Path) -> dict:
         "resolution": req["tier"],
         "aspect_ratio": req["aspect_spec"],
         "num_frames": req["num_frames"],
+        "max_frames": req["num_frames"],   # framework takes the length from the control video, capped by max_frames
         "fps": int(req["fps"]) if float(req["fps"]).is_integer() else req["fps"],
         "shift": req["flow_shift"],
         "num_steps": req["steps"],
@@ -280,7 +281,7 @@ def sim2real_meta(controls: dict[str, str], prompt: Any, seed: int = 0, *, backe
                   **knobs: Any) -> dict:
     s = get_settings()
     req = build_transfer_request(controls, prompt, seed=seed, s=s, **knobs)
-    key, alias = transfer_key(req)
+    key, aliases = transfer_key(req)
     b = backend or resolve_backend("generator", s)
     engine = None
     if b == "replay" and s.transfer_backend in ("auto", "framework") and framework_available(s) and backend is None:
@@ -297,7 +298,7 @@ def sim2real_meta(controls: dict[str, str], prompt: Any, seed: int = 0, *, backe
 
     kinds = "+".join(req["controls"])
     first_control = next(iter(req["controls"].values()))
-    return run_media(FN_TRANSFER, req, key, alias, call, backend=b,
+    return run_media(FN_TRANSFER, req, key, aliases, call, backend=b,
                      placeholder_title=f"Sim2Real ({kinds}): {req['query_text'][:100]}",
                      placeholder_sub=f"Cosmos3 Transfer {req['width']}x{req['height']} {req['num_frames']}f seed {seed} - "
                                      "background shows the input control video",

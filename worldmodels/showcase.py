@@ -183,7 +183,7 @@ def warm_cache(manifest: Optional[str | Path] = None, *, showcase: Optional[str 
             try:
                 meta = generate.what_if_meta(job["prompt"], image_path=image, video_path=video,
                                              seconds=job.get("seconds", 5), seed=job.get("seed", 0), preset=preset,
-                                             scene=job.get("scene"))
+                                             scene=job.get("scene"), match_text=f"{jid} {job.get('title', '')}")
                 report["what_if"][jid] = {"title": job.get("title"), "path": meta["path"], "source": meta["source"],
                                           "latency_ms": meta["latency_ms"], "image": image, "video": video,
                                           "prompt": job["prompt"], "placeholder": meta.get("placeholder", False)}
@@ -221,6 +221,16 @@ def warm_cache(manifest: Optional[str | Path] = None, *, showcase: Optional[str 
     if not dry_run:
         rp = report_path()
         rp.parent.mkdir(parents=True, exist_ok=True)
+        if rp.exists():  # never replace a real Cosmos result from an earlier GPU run with a placeholder
+            try:
+                old = json.loads(rp.read_text())
+                for section in ("what_if", "transfer"):
+                    for jid, prev in (old.get(section) or {}).items():
+                        cur = report[section].get(jid)
+                        if (cur is None or cur.get("placeholder")) and not prev.get("placeholder") and Path(prev.get("path", "")).exists():
+                            report[section][jid] = {**prev, "kept_from_previous_run": True}
+            except Exception:
+                pass
         rp.write_text(json.dumps(report, indent=2, default=str))
         report["report_path"] = str(rp)
     return report

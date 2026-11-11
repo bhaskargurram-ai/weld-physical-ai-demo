@@ -1,0 +1,53 @@
+{
+  "subjects": [
+    {
+      "description": "The FCAW fill pass on a carbon-steel pipe butt joint: bright arc, molten weld pool and a solidifying bead with regular ripples. Robotic FCAW fill pass on A106 Gr.B pipe: bright arc, glowing weld pool, grey solidified bead with fine ripples and light spatter",
+      "appearance_details": "Glowing orange-white weld pool, dark grey solidified bead with slag/oxide film, heat-tint colours on the base metal, occasional spatter.",
+      "relationship": "The robot torch deposits the bead while the positioner rotates the pipe",
+      "location": "Centre of frame",
+      "relative_size": "Large within frame",
+      "orientation": "Joint runs left to right",
+      "pose": "Torch at a constant work and travel angle",
+      "action": "Robotic FCAW fill pass on A106 Gr.B pipe: bright arc, glowing weld pool, grey solidified bead with fine ripples and light spatter",
+      "state_changes": "The bead grows steadily along the joint.",
+      "number_of_subjects": 1
+    }
+  ],
+  "background_setting": "An industrial pipe-spool fabrication bay: a carbon-steel pipe section clamped in a powered rotary positioner, a six-axis robotic welding arm with a gas-cooled MIG/FCAW torch, welding curtains, steel fixtures, ground clamp and cables, grinding dust on the floor; bright overhead high-bay lighting.",
+  "lighting": {
+    "conditions": "Intense arc light dominating a dim cell",
+    "direction": "From the arc at the torch tip",
+    "shadows": "Hard flickering shadows cast by the torch nozzle",
+    "illumination_effect": "Arc glare with bloom, glowing pool, cooler bead behind"
+  },
+  "aesthetics": {
+    "composition": "Weld pool centred, finished bead trailing behind",
+    "color_scheme": "Orange-white arc and pool against grey-blue steel",
+    "mood_atmosphere": "Industrial, precise, documentary"
+  },
+  "cinematography": {
+    "camera_motion": "Camera rigidly mounted on the torch, moving with it; the pipe surface slides past",
+    "framing": "Extreme close-up of the arc, weld pool and freshly deposited bead",
+    "camera_angle": "Torch-mounted, looking down the joint at about 30 degrees",
+    "depth_of_field": "Shallow",
+    "focus": "Sharp on the molten weld pool and bead toes",
+    "lens_focal_length": "Macro, welding-camera optics with an ND / auto-darkening filter"
+  },
+  "style_medium": "Live-action video",
+  "artistic_style": "Realistic industrial welding-camera footage",
+  "context": "Robotic welding of ASME B31.3 process piping in a fabrication shop; photoreal rendering that follows the structure of the provided control video exactly",
+  "actions": [
+    {
+      "time": "0:00-0:05",
+      "description": "Robotic FCAW fill pass on A106 Gr.B pipe: bright arc, glowing weld pool, grey solidified bead with fine ripples and light spatter"
+    }
+  ],
+  "temporal_caption": "Robotic FCAW fill pass on A106 Gr.B pipe: bright arc, glowing weld pool, grey solidified bead with fine ripples and light spatter",
+  "resolution": {
+    "W": 1280,
+    "H": 720
+  },
+  "aspect_ratio": "16,9",
+  "duration": "5s",
+  "fps": 24
+}

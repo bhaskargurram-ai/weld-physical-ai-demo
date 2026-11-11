@@ -111,9 +111,10 @@ def request_key(req: dict) -> tuple[str, str]:
     inputs["image"] = cache.FileRef(req["image_path"]) if req.get("image_path") else None
     inputs["video"] = cache.FileRef(req["video_path"]) if req.get("video_path") else None
     key = cache.make_key(FN_WHATIF, inputs)
-    alias = cache.alias_key(FN_WHATIF, req["query_text"], sha_or_none(req.get("image_path")),
-                            sha_or_none(req.get("video_path")))
-    return key, alias
+    same_inputs = cache.alias_key(FN_WHATIF, req["query_text"], sha_or_none(req.get("image_path")),
+                                  sha_or_none(req.get("video_path")))
+    same_prompt = cache.alias_key(FN_WHATIF, "prompt-only", req["mode"], req["query_text"])
+    return key, [same_inputs, same_prompt]
 
 
 def sha_or_none(path: Optional[str]) -> Optional[str]:
@@ -251,13 +252,17 @@ def _call_nim(req: dict, s: Settings, out: Path) -> Path:
 
 
 # ------------------------------------------------------------------ public API
-def _replay_lookup(fn: str, key: str, alias: str, query_text: str, t0: float, allow_nearest: bool = True) -> Optional[dict]:
+def _replay_lookup(fn: str, key: str, aliases: list[str], query_text: str, t0: float,
+                   allow_nearest: bool = True) -> Optional[dict]:
     if get_settings().cache_mode == "off":
         return None
-    k2 = cache.resolve_alias(fn, alias)
-    hit = cache.get_media(fn, k2) if k2 else None
-    match = "same-prompt"
-    score = None
+    hit, match, score = None, None, None
+    for i, alias in enumerate(aliases):
+        k2 = cache.resolve_alias(fn, alias)
+        hit = cache.get_media(fn, k2) if k2 else None
+        if hit:
+            match = "same-prompt-and-inputs" if i == 0 else "same-prompt"
+            break
     if not hit and allow_nearest and query_text:
         near = cache.nearest_media(fn, query_text)
         if near:
@@ -271,7 +276,7 @@ def _replay_lookup(fn: str, key: str, alias: str, query_text: str, t0: float, al
             "latency_ms": int(round((time.perf_counter() - t0) * 1000))}
 
 
-def run_media(fn: str, req: dict, key: str, alias: str, call, *, backend: Optional[str], placeholder_title: str,
+def run_media(fn: str, req: dict, key: str, aliases: list[str], call, *, backend: Optional[str], placeholder_title: str,
               placeholder_sub: str, placeholder_bg: Optional[str], seconds: float, extra_meta: Optional[dict] = None,
               allow_nearest: bool = True) -> dict:
     """Shared cache / backend / fallback driver for every video-producing call."""
@@ -295,7 +300,7 @@ def run_media(fn: str, req: dict, key: str, alias: str, call, *, backend: Option
                 meta = {"source": backend_source(b), "backend": b, "latency_ms": ms(), "fn": fn,
                         "query_text": req.get("query_text", ""), "request": public_req, **(extra_meta or {})}
                 if cache.writing_enabled():
-                    dst = cache.put_media(fn, key, tmp_out, meta, aliases=[alias], move=True)
+                    dst = cache.put_media(fn, key, tmp_out, meta, aliases=aliases, move=True)
                 else:  # cache off / read-only: still need a durable file
                     dst = cache.cache_root() / "uncached" / f"{key}.mp4"
                     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -305,7 +310,7 @@ def run_media(fn: str, req: dict, key: str, alias: str, call, *, backend: Option
             error = str(e)
             if not s.fallback:
                 raise
-    hit = _replay_lookup(fn, key, alias, req.get("query_text", ""), t0, allow_nearest=allow_nearest)
+    hit = _replay_lookup(fn, key, aliases, req.get("query_text", ""), t0, allow_nearest=allow_nearest)
     if hit:
         if error:
             hit["error"] = error
@@ -325,19 +330,22 @@ def what_if_meta(prompt: Any, image_path: Optional[str] = None, video_path: Opti
 
     knobs: preset (smoke|live|showcase), resolution ("832x480" | "480" | "720"), num_frames, fps,
     steps, guidance, flow_shift, negative, wrap (wrap free text into the weld-cell JSON prompt),
-    scene ({process, pass_type, defect, view}), condition ("last"|"first" for video2video).
+    scene ({process, pass_type, defect, view}), condition ("last"|"first" for video2video),
+    match_text (extra words stored for replay nearest-prompt matching, e.g. a showcase title).
     """
     s = get_settings()
+    match_text = knobs.pop("match_text", None)
     req = build_request(prompt, image_path=image_path, video_path=video_path, seconds=seconds, seed=seed, s=s, **knobs)
-    key, alias = request_key(req)
+    key, aliases = request_key(req)
 
     def call(b: str, out: Path) -> Path:
         return _call_local(req, s, out) if b == "local" else _call_nim(req, s, out)
 
-    return run_media(FN_WHATIF, req, key, alias, call, backend=backend,
+    return run_media(FN_WHATIF, req, key, aliases, call, backend=backend,
                      placeholder_title=f"What if: {req['query_text'][:120]}",
                      placeholder_sub=f"Cosmos3 {req['mode']} {req['width']}x{req['height']} {req['num_frames']}f seed {seed}",
-                     placeholder_bg=video_path or image_path, seconds=float(seconds), extra_meta={"mode": req["mode"]})
+                     placeholder_bg=video_path or image_path, seconds=float(seconds),
+                     extra_meta={"mode": req["mode"], "match_text": match_text or ""})
 
 
 def what_if(prompt: Any, image_path: Optional[str] = None, video_path: Optional[str] = None,

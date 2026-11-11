@@ -189,12 +189,13 @@ def _tokens(text: str) -> set[str]:
     return {w for w in _WORD.findall(text.lower()) if w not in _STOP and len(w) > 1}
 
 
-def nearest_media(fn: str, query: str, min_score: float = 0.35) -> Optional[tuple[Path, dict, float]]:
-    """Best cached media of ``fn`` whose sidecar ``query_text`` overlaps ``query``.
+def nearest_media(fn: str, query: str, min_coverage: float = 0.5) -> Optional[tuple[Path, dict, float]]:
+    """Best cached media of ``fn`` whose sidecar ``query_text``/``match_text`` covers ``query``.
 
     Used by replay mode so a live-typed "what if" question that is close to a
     pre-generated showcase prompt still gets a real Cosmos clip (labelled as a
-    nearest match).  Jaccard similarity on content words.
+    nearest match). Score = 0.7 * (share of the query's content words found)
+    + 0.3 * Jaccard; needs >= 2 shared words and ``min_coverage``.
     """
     q = _tokens(query)
     if not q:
@@ -208,14 +209,16 @@ def nearest_media(fn: str, query: str, min_score: float = 0.35) -> Optional[tupl
             meta = json.loads(sp.read_text())
         except Exception:
             continue
-        t = _tokens(str(meta.get("query_text", "")))
-        if not t:
+        t = _tokens(f"{meta.get('query_text', '')} {meta.get('match_text', '')}")
+        shared = q & t
+        if len(shared) < min(2, len(q)) or not t:
             continue
-        score = len(q & t) / len(q | t)
-        mp = Path(meta.get("path") or sp.with_name(sp.name.replace(".meta.json", ".mp4")))
-        if not mp.exists():
-            mp = sp.with_name(sp.name.replace(".meta.json", ".mp4"))
-        if score >= min_score and mp.exists() and (best is None or score > best[2]):
+        coverage = len(shared) / len(q)
+        if coverage < min_coverage:
+            continue
+        score = 0.7 * coverage + 0.3 * len(shared) / len(q | t)
+        mp = sp.with_name(sp.name.replace(".meta.json", ".mp4"))
+        if mp.exists() and (best is None or score > best[2]):
             best = (mp, meta, score)
     return best
 
