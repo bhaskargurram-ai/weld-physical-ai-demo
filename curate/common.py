@@ -1,0 +1,174 @@
+"""Shared helpers: input discovery, sidecar normalisation, path handling."""
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+log = logging.getLogger("curate")
+
+try:
+    from collect.schema import CLIP_SECONDS as _CLIP_S
+except Exception:  # noqa: BLE001 - keep curate usable without collect/
+    _CLIP_S = 5
+CLIP_DEFAULTS = {"clip_s": float(_CLIP_S), "stride_s": float(_CLIP_S), "min_s": 2.0}
+
+STAT_KEYS = ("mean", "std", "min", "max")
+
+
+@dataclass
+class ClipInput:
+    """One exported clip: ``<input>/<clip_id>.mp4`` plus optional ``.json`` sidecar."""
+
+    clip_id: str
+    video: Path
+    sidecar: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def sequence_name(self) -> str:
+        return str(self.sidecar.get("sequence_name") or self.meta.get("sequence_name") or self.clip_id)
+
+    @property
+    def meta(self) -> dict[str, Any]:
+        m = self.sidecar.get("meta")
+        return m if isinstance(m, dict) else {}
+
+    @property
+    def t0_s(self) -> float:
+        return float(self.sidecar.get("t0_s") or 0.0)
+
+    @property
+    def t1_s(self) -> float | None:
+        v = self.sidecar.get("t1_s")
+        return None if v is None else float(v)
+
+
+def discover_inputs(input_dir: str | Path) -> list[ClipInput]:
+    """Find ``*.mp4`` files at the top of ``input_dir`` and pair them with sidecars.
+
+    If any sidecars exist, mp4s without one are ignored (they are typically control
+    videos or previews); if none exist, every mp4 is used with an empty sidecar.
+    """
+    root = Path(input_dir)
+    if not root.is_dir():
+        raise FileNotFoundError(f"input directory not found: {root}")
+    videos = sorted(p for p in root.glob("*.mp4") if p.is_file())
+    pairs: list[ClipInput] = []
+    any_sidecar = False
+    for v in videos:
+        sc_path = v.with_suffix(".json")
+        sidecar: dict[str, Any] = {}
+        if sc_path.exists():
+            any_sidecar = True
+            try:
+                sidecar = json.loads(sc_path.read_text())
+            except json.JSONDecodeError as exc:
+                log.warning("bad sidecar %s: %s", sc_path, exc)
+                sidecar = {}
+        clip_id = str(sidecar.get("clip_id") or v.stem)
+        pairs.append(ClipInput(clip_id=clip_id, video=v, sidecar=sidecar))
+    if any_sidecar:
+        pairs = [p for p in pairs if p.video.with_suffix(".json").exists()]
+    return pairs
+
+
+def normalize_signal_stats(stats: Any) -> dict[str, dict[str, float]]:
+    """Return ``{signal: {mean, std, min, max}}`` from either nesting order.
+
+    The export contract says ``signal_stats{mean,std,min,max per signal}``; accept
+    ``{signal: {mean:..}}`` and ``{mean: {signal:..}}`` alike.
+    """
+    if not isinstance(stats, dict) or not stats:
+        return {}
+    keys = set(stats)
+    if keys and keys <= set(STAT_KEYS) and all(isinstance(v, dict) for v in stats.values()):
+        out: dict[str, dict[str, float]] = {}
+        for stat, per_sig in stats.items():
+            for sig, val in per_sig.items():
+                out.setdefault(sig, {})[stat] = _f(val)
+        return out
+    out = {}
+    for sig, val in stats.items():
+        if isinstance(val, dict):
+            out[sig] = {k: _f(val[k]) for k in STAT_KEYS if k in val}
+        elif isinstance(val, (int, float)):
+            out[sig] = {"mean": float(val)}
+    return out
+
+
+def _f(v: Any) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def round_stats(stats: dict[str, dict[str, float]], nd: int = 3) -> dict[str, dict[str, float]]:
+    return {s: {k: (round(v, nd) if v == v else None) for k, v in d.items()} for s, d in stats.items()}
+
+
+def defect_name(d: Any) -> str:
+    """Defect type from a defect dict / string (``defect`` or ``type`` key)."""
+    if isinstance(d, str):
+        return d
+    if isinstance(d, dict):
+        return str(d.get("defect") or d.get("type") or d.get("name") or "unknown")
+    return "unknown"
+
+
+def defect_window(d: dict[str, Any]) -> tuple[float | None, float | None]:
+    for a, b in (("t_start_s", "t_end_s"), ("t_start", "t_end"), ("t0_s", "t1_s")):
+        if a in d or b in d:
+            s, e = d.get(a), d.get(b)
+            return (None if s is None else float(s), None if e is None else float(e))
+    return None, None
+
+
+def defects_overlapping(defects: list[Any], t0: float, t1: float) -> list[Any]:
+    """Keep defects whose window overlaps [t0, t1]; keep ones without times."""
+    out = []
+    for d in defects or []:
+        if not isinstance(d, dict):
+            out.append(d)
+            continue
+        if defect_name(d) in ("none", ""):
+            continue
+        s, e = defect_window(d)
+        if s is None and e is None:
+            out.append(d)
+            continue
+        s = t0 if s is None else s
+        e = t1 if e is None else e
+        if e >= t0 and s <= t1:
+            out.append(d)
+    return out
+
+
+def violations_overlapping(viol: list[dict], t0: float, t1: float) -> list[dict]:
+    out = []
+    for v in viol or []:
+        s, e = v.get("t_start_s"), v.get("t_end_s")
+        if s is None or e is None or (float(e) >= t0 and float(s) <= t1):
+            out.append(v)
+    return out
+
+
+def stable_id(*parts: Any) -> str:
+    return hashlib.sha256(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:32]
+
+
+def display_path(p: str | Path) -> str:
+    """Path relative to the cwd (repo root) when below it, else absolute."""
+    p = Path(p).resolve()
+    try:
+        return p.relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError:
+        return p.as_posix()
+
+
+def env(name: str, default: str) -> str:
+    return os.environ.get(name) or default
