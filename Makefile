@@ -18,7 +18,7 @@ PIPELINE   := $(PY) scripts/run_pipeline.py --data-dir $(DATA_DIR) --n-passes $(
 # (an empty `ANTHROPIC_API_KEY=` line must not wipe a key you exported) — same loader as runpod/
 LOAD_ENV   := . runpod/lib.sh && load_env_file .env;
 
-.PHONY: help setup-local env infra-up infra-down infra-logs simulate ingest export curate warm-cache \
+.PHONY: help setup-local env cloud-run cloud-serve cloud-status cloud-logs cloud-down infra-up infra-down infra-logs simulate ingest export curate warm-cache \
         pipeline copilot copilot-fixtures demo-local demo-runpod runpod-bootstrap runpod-status runpod-stop \
         test lint clean
 
@@ -36,8 +36,8 @@ setup-local: $(PY) env  ## create .venv and install requirements.txt (uv if avai
 	 else $(PY) -m pip install -q --upgrade pip && $(PY) -m pip install -q -r requirements.txt; fi
 	@echo "venv ready: $(VENV)  ($$($(PY) --version))"
 
-env:  ## create .env from configs/demo.env.example (if missing)
-	@[ -f .env ] || { cp configs/demo.env.example .env; echo "created .env (edit for API keys)"; }
+env:  ## create .env from .env.example (if missing) — fill in your API keys
+	@[ -f .env ] || { cp .env.example .env; echo "created .env (edit for API keys; advanced settings: configs/demo.env.example)"; }
 
 # ------------------------------------------------------------------ local infra (Docker)
 infra-up:  ## start Postgres + mosaicod + MinIO (infra/docker-compose.yml)
@@ -93,6 +93,22 @@ demo-runpod:  ## on the pod: infra -> pipeline (Curator if available) -> Cosmos 
 	bash runpod/start_all.sh models --wait
 	. runpod/lib.sh && load_env && $(PY) scripts/run_pipeline.py --data-dir $(DATA_DIR) --only warm-cache
 	bash runpod/start_all.sh copilot
+
+# ------------------------------------------------------------------ Runpod from your laptop (.env keys)
+cloud-run:  ## laptop: volume -> GPU pod -> full pipeline -> follow logs -> terminate pod (RUN_MODE from .env)
+	python3 runpod/launch.py run
+
+cloud-serve:  ## laptop: same, then keep the Weld Copilot online for SERVE_HOURS, then terminate
+	python3 runpod/launch.py run --mode serve
+
+cloud-status:  ## laptop: show the recorded pod / volume
+	python3 runpod/launch.py status
+
+cloud-logs:  ## laptop: re-attach to the running pod's logs
+	python3 runpod/launch.py logs
+
+cloud-down:  ## laptop: terminate the pod now (DELETE_VOLUME=1 also deletes the storage)
+	python3 runpod/launch.py down $(if $(filter 1,$(DELETE_VOLUME)),--delete-volume,)
 
 runpod-bootstrap:  ## on the pod: one-time setup (idempotent)
 	bash runpod/bootstrap.sh

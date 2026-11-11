@@ -1,5 +1,10 @@
 # Running WeldWorld on RunPod
 
+> **Fastest path:** `cp .env.example .env`, fill in the keys, then `python3 runpod/launch.py` on your laptop.
+> It creates the network volume and GPU pod through the Runpod API v2, runs the whole pipeline
+> (`runpod/pod_entry.sh`), streams the logs, and terminates the pod when the code ends. The rest of this
+> guide explains what happens inside the pod and how to do it by hand.
+
 This guide takes you from an empty RunPod account to the Weld Copilot running on a GPU pod with
 Mosaico, Cosmos Curator and Cosmos 3 (Reasoner and Generator), in about **90 minutes**. Most of
 that time goes to downloads, and you only pay it once because everything lands on a network volume.
