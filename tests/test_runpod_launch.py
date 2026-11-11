@@ -163,3 +163,25 @@ def test_dry_run_masks_secrets(env_file, monkeypatch, capsys):
     assert launch.main(["run", "--env-file", str(env_file), "--dry-run"]) == 0
     out = capsys.readouterr().out
     assert "hf_x" not in out and "sk-ant-x" not in out and '"HF_TOKEN": "***"' in out
+
+
+def test_bad_image_stops_immediately(env_file, monkeypatch):
+    api = FakeApi(unavailable=())
+    orig = api.__call__
+
+    def bad_image(req, timeout=None):
+        if req.get_method() == "POST" and req.full_url.endswith("/pods"):
+            api.calls.append(("POST", "/pods", json.loads(req.data)))
+            raise urllib.error.HTTPError(req.full_url, 422, "x", {}, io.BytesIO(
+                b'{"detail":"Container image \\"x\\" was not found on the registry."}'))
+        return orig(req, timeout)
+
+    monkeypatch.setattr(launch.urllib.request, "urlopen", bad_image)
+    with pytest.raises(SystemExit, match="container image"):
+        launch.main(["run", "--env-file", str(env_file)])
+    assert sum(1 for m, p, _ in api.calls if (m, p) == ("POST", "/pods")) == 1   # no retry on other GPU types
+
+
+def test_default_image_tag_is_a_published_release():
+    cfg = launch.parse_env_file(ROOT / ".env.example")
+    assert cfg["IMAGE"] == launch.DEFAULTS["IMAGE"] == "runpod/pytorch:2.1.0-cu1300-torch2130-ubuntu2404"

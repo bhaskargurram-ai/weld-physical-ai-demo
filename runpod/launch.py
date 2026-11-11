@@ -55,7 +55,7 @@ DEFAULTS = {
     "GPU_COUNT": "2",
     "CLOUD": "SECURE",
     "MIN_CUDA_VERSION": "13.0",
-    "IMAGE": "runpod/pytorch:1.2.0-cu1300-torch2130-ubuntu2404",
+    "IMAGE": "runpod/pytorch:2.1.0-cu1300-torch2130-ubuntu2404",
     "CONTAINER_DISK_GB": "80",
     "VOLUME_NAME": "weldworld",
     "VOLUME_SIZE_GB": "300",
@@ -311,6 +311,11 @@ def create_pod(rp: Runpod, cfg: dict, vol: dict) -> dict:
             log(f"pod {pod['id']} created (${pod.get('cost', '?')}/h compute)")
             return pod
         except ApiError as e:
+            if e.status == 422 and "image" in e.body.lower():
+                raise SystemExit(f"Runpod rejected the container image: {e}\n"
+                                 "Set IMAGE in .env to an existing tag, e.g. "
+                                 "runpod/pytorch:2.1.0-cu1300-torch2130-ubuntu2404 "
+                                 "(list: https://hub.docker.com/r/runpod/pytorch/tags)") from None
             errors.append(f"{gpu}: {e}")
             log(f"  not available: {e}")
     raise SystemExit("Could not create a pod:\n  " + "\n  ".join(errors) +

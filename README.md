@@ -114,7 +114,7 @@ Recommended: **2× H100 80GB** (about $8/hr Secure Cloud) with a **300 GB networ
 host (driver ≥ 580). Budget: 1× H100 (Reasoner + FP8 Generator with offload).
 
 ```bash
-# on the pod (image runpod/pytorch:1.2.0-cu1300-torch2130-ubuntu2404; HTTP ports 7860,9001; TCP 22,6726)
+# on the pod (image runpod/pytorch:2.1.0-cu1300-torch2130-ubuntu2404; HTTP ports 7860,9001; TCP 22,6726)
 cd /workspace && git clone <this-repo-url> weld-physical-ai-demo && cd weld-physical-ai-demo
 bash runpod/bootstrap.sh        # once per volume: Postgres, MinIO, mosaicod, Curator (pixi), Cosmos 3 weights, vLLM
 make demo-runpod                # pipeline on GPU → model servers → warm cache → copilot

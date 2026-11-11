@@ -73,7 +73,7 @@ own CUDA runtimes.
 | Cosmos 3 Reasoner (vLLM) | cu130 wheels (`vllm==0.21.0`) on driver ≥ 580, or **cu128** wheels (`vllm==0.19.1`) on CUDA 12.8 hosts | `worldmodels/serve/install.sh` is called with `COSMOS_CUDA_TAG=cu130/cu128`, chosen from the driver |
 | Cosmos 3 Generator (vLLM-Omni) | same as above | |
 
-**Recommended image:** `runpod/pytorch:1.2.0-cu1300-torch2130-ubuntu2404` (official RunPod PyTorch, CUDA 13.0, see
+**Recommended image:** `runpod/pytorch:2.1.0-cu1300-torch2130-ubuntu2404` (official RunPod PyTorch, CUDA 13.0, see
 [runpod/containers](https://github.com/runpod/containers/blob/main/official-templates/pytorch/README.md)).
 If no CUDA-13 host is available, `runpod/pytorch:1.2.0-cu1281-torch2130-ubuntu2404` works too. Bootstrap then skips
 Curator and the demo curates with `BACKEND=lite`, and vLLM uses cu128 wheels.
@@ -117,7 +117,7 @@ Space budget (measured from Hugging Face repo sizes):
    (or 1× H100 PCIe).
 2. **Filters → CUDA versions: 13.0** or newer.
 3. **Change template / Edit template**:
-   - Container image: `runpod/pytorch:1.2.0-cu1300-torch2130-ubuntu2404`
+   - Container image: `runpod/pytorch:2.1.0-cu1300-torch2130-ubuntu2404`
    - Container disk: **60 GB**. apt packages and `/tmp` live here. Weights do **not**.
    - **Expose HTTP ports:** `7860,9001`
    - **Expose TCP ports:** `22,6726`
@@ -136,7 +136,7 @@ Space budget (measured from Hugging Face repo sizes):
 runpodctl network-volume list                      # note the volume id
 runpodctl pod create \
   --name weldworld \
-  --image "runpod/pytorch:1.2.0-cu1300-torch2130-ubuntu2404" \
+  --image "runpod/pytorch:2.1.0-cu1300-torch2130-ubuntu2404" \
   --gpu-id "NVIDIA H100 80GB HBM3" --gpu-count 2 \
   --network-volume-id <VOLUME_ID> \
   --container-disk-in-gb 60 \
