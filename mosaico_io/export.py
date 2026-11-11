@@ -22,6 +22,7 @@ import math
 import os
 import sys
 import time
+from fractions import Fraction
 from pathlib import Path
 from typing import Optional
 
@@ -66,14 +67,18 @@ class _Enc:
         self.s = self.c.add_stream("libx264", rate=int(round(fps)))
         self.s.width, self.s.height, self.s.pix_fmt = w, h, "yuv420p"
         self.s.options = {"crf": str(crf), "preset": "veryfast", "movflags": "+faststart"}
+        self.s.codec_context.time_base = Fraction(1, int(round(fps)))
         self.n = 0
 
     def write(self, frame):
         import av
-        if not isinstance(frame, av.VideoFrame):
-            frame = av.VideoFrame.from_ndarray(frame, format="rgb24")
-        frame.pts = None
-        for p in self.s.encode(frame.reformat(format="yuv420p")):
+        if isinstance(frame, av.VideoFrame):
+            frame = frame.reformat(format="yuv420p")
+        else:
+            frame = av.VideoFrame.from_ndarray(frame, format="rgb24").reformat(format="yuv420p")
+        frame.pts = self.n
+        frame.time_base = self.s.codec_context.time_base
+        for p in self.s.encode(frame):
             self.c.mux(p)
         self.n += 1
 

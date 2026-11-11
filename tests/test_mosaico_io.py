@@ -101,7 +101,10 @@ def test_export_clips_offline(offline, tmp_path):
         assert set(sc["signal_stats"]["current_a"]) == {"mean", "std", "min", "max"}
         assert abs(sc["t1_s"] - sc["t0_s"] - 2.0) < 1e-6
         with av.open(str(tmp_path / f"{r['clip_id']}.mp4")) as c:
-            assert sum(1 for _ in c.decode(video=0)) == 48
+            st = c.streams.video[0]
+            assert st.average_rate == 24
+            assert sum(1 for _ in c.decode(st)) == 48
+            assert abs(float(st.duration * st.time_base) - 2.0) < 0.05
         assert (tmp_path / sc["control"]["edge"]).exists() and (tmp_path / sc["control"]["depth"]).exists()
     d = [r for r in res if r["label"] == "defect"][0]
     assert d["defects_in_window"][0]["defect"] == "porosity"
