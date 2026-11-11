@@ -1,0 +1,73 @@
+{
+  "_comment": "Showcase generations pre-computed by `python -m worldmodels.cli warm-cache` on the GPU pod before the customer meeting. Replay mode serves them by id (worldmodels.showcase) and as nearest-prompt matches for live-typed what-if questions. condition: none = text2video, image = first frame of source_clip (image2video), video = continue source_clip (video2video). source_clip: auto = first kept curated clip, auto:<defect> = first kept clip with that defect.",
+  "what_if": [
+    {
+      "id": "baseline-fcaw-fill",
+      "title": "Baseline: FCAW fill pass inside the WPS window",
+      "prompt": "Steady FCAW fill pass with stable arc, consistent ripple spacing and a smooth, flat bead that wets evenly into both bevel faces",
+      "scene": {"process": "FCAW", "pass_type": "fill", "defect": null},
+      "condition": "image", "source_clip": "auto", "seconds": 5, "seed": 0
+    },
+    {
+      "id": "travel-speed-plus-40",
+      "title": "What if travel speed jumps 40% on the fill pass?",
+      "prompt": "Travel speed increases 40 percent: the weld pool shrinks, the bead becomes narrow and ropey and stops wetting into the sidewall, leaving a cold lap line of lack of fusion",
+      "scene": {"process": "FCAW", "pass_type": "fill", "defect": "lack_of_fusion"},
+      "condition": "image", "source_clip": "auto", "seconds": 5, "seed": 1
+    },
+    {
+      "id": "gas-flow-loss",
+      "title": "What if shielding gas drops below 8 L/min?",
+      "prompt": "Shielding gas flow drops below 8 litres per minute: the arc sputters, gas pockets bubble through the molten pool and freeze as surface porosity and pinholes in the bead",
+      "scene": {"process": "FCAW", "pass_type": "fill", "defect": "porosity"},
+      "condition": "image", "source_clip": "auto:porosity", "seconds": 5, "seed": 2
+    },
+    {
+      "id": "voltage-high-undercut",
+      "title": "What if arc voltage runs 20% high?",
+      "prompt": "Arc voltage rises 20 percent: the arc widens and flares, the bead flattens and a groove of undercut melts into the base metal along the bead toe",
+      "scene": {"process": "FCAW", "pass_type": "cap", "defect": "undercut"},
+      "condition": "image", "source_clip": "auto:undercut", "seconds": 5, "seed": 3
+    },
+    {
+      "id": "root-burn-through",
+      "title": "What if the GTAW root runs hot and slow?",
+      "prompt": "GTAW root pass with current 30 percent high and travel slowing down: the keyhole grows, the root melts through and molten metal sags out of the joint as burn-through",
+      "scene": {"process": "GTAW", "pass_type": "root", "defect": "burn_through"},
+      "condition": "none", "source_clip": null, "seconds": 5, "seed": 4
+    },
+    {
+      "id": "continue-clip",
+      "title": "Continue the inspected clip for 5 more seconds",
+      "prompt": "The robot continues the same weld pass with the same parameters, the positioner keeps rotating the pipe and the bead keeps growing along the joint",
+      "scene": {"process": "FCAW", "pass_type": "fill", "defect": null},
+      "condition": "video", "source_clip": "auto", "seconds": 5, "seed": 5
+    }
+  ],
+  "transfer": [
+    {
+      "id": "sim2real-edge",
+      "title": "Sim -> real from the simulator edge map",
+      "kinds": ["edge"],
+      "prompt": "Photoreal torch-camera footage of a robotic FCAW fill pass on carbon-steel pipe, bright arc, glowing weld pool and grey solidified bead with fine ripples",
+      "scene": {"process": "FCAW", "pass_type": "fill", "defect": null},
+      "source_pass": "auto", "seed": 0
+    },
+    {
+      "id": "sim2real-depth",
+      "title": "Sim -> real from the simulator depth map",
+      "kinds": ["depth"],
+      "prompt": "Photoreal torch-camera footage of a robotic FCAW fill pass on carbon-steel pipe, bright arc, glowing weld pool and grey solidified bead with fine ripples",
+      "scene": {"process": "FCAW", "pass_type": "fill", "defect": null},
+      "source_pass": "auto", "seed": 0
+    },
+    {
+      "id": "sim2real-edge-depth-porosity",
+      "title": "Sim -> real, edge + depth, porosity pass",
+      "kinds": ["edge", "depth"],
+      "prompt": "Photoreal torch-camera footage of a robotic FCAW pass where gas pockets erupt through the weld pool and leave surface porosity in the bead",
+      "scene": {"process": "FCAW", "pass_type": "fill", "defect": "porosity"},
+      "source_pass": "auto:porosity", "seed": 0
+    }
+  ]
+}

@@ -1,0 +1,87 @@
+# WeldWorld local infrastructure
+#
+#   docker compose -f infra/docker-compose.yml up -d
+#
+# Services
+#   database        Postgres (mosaicod catalog)
+#   mosaicod        Mosaico daemon, Arrow Flight / gRPC on localhost:6726, file store in volume
+#   minio           S3-compatible object store on :9000 (API) / :9001 (console)
+#   minio-init      one-shot: creates bucket `raw` (Cosmos Curator Next reads s3://raw/)
+#
+# Image overrides (useful when Docker Hub is rate limited / MinIO images are gated):
+#   POSTGRES_IMAGE  (default postgres:16-alpine;  e.g. public.ecr.aws/docker/library/postgres:16-alpine)
+#   MOSAICOD_IMAGE  (default ghcr.io/mosaico-labs/mosaicod:latest)
+#   MINIO_IMAGE     (default minio/minio:latest;  e.g. cgr.dev/chainguard/minio:latest)
+#   MC_IMAGE        (default minio/mc:latest)
+name: "weldworld"
+
+services:
+  database:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    hostname: db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: mosaico
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mosaico"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  mosaicod:
+    image: ${MOSAICOD_IMAGE:-ghcr.io/mosaico-labs/mosaicod:latest}
+    command: server --host 0.0.0.0 --port 6726 --log-level info
+    environment:
+      MOSAICOD_DB_URL: postgresql://db:5432/mosaico
+      MOSAICOD_DB_USER: postgres
+      MOSAICOD_DB_PASSWORD: password
+      MOSAICOD_STORE_ENDPOINT: file:///
+      MOSAICOD_STORE_BUCKET: data
+    volumes:
+      - mosaico-data:/data
+    ports:
+      - "127.0.0.1:6726:6726"
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: unless-stopped
+
+  minio:
+    image: ${MINIO_IMAGE:-minio/minio:latest}
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    restart: unless-stopped
+
+  minio-init:
+    image: ${MC_IMAGE:-minio/mc:latest}
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      for i in $$(seq 1 30); do
+        mc alias set local http://minio:9000 $${MINIO_ROOT_USER:-minioadmin} $${MINIO_ROOT_PASSWORD:-minioadmin} && break;
+        sleep 1;
+      done;
+      mc mb --ignore-existing local/raw;
+      mc anonymous set download local/raw || true;
+      echo 'bucket raw ready'
+      "
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    restart: "no"
+
+volumes:
+  pg-data:
+  mosaico-data:
+  minio-data:

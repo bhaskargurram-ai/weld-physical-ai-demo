@@ -1,0 +1,22 @@
+# WeldWorld demo — CPU-side Python dependencies (collect, mosaico_io, curate-lite, worldmodels clients, copilot).
+# GPU serving (vLLM / vLLM-Omni) lives in separate venvs created by worldmodels/serve/install.sh,
+# and Cosmos Curator lives in its own pixi environment (runpod/bootstrap.sh).
+numpy
+pandas
+pyarrow
+opencv-python-headless
+av
+pylance
+mosaicolabs
+fastapi
+uvicorn[standard]
+httpx
+openai
+anthropic
+pytest
+python-multipart
+pydantic
+sse-starlette
+boto3
+pyyaml
+huggingface_hub

@@ -1,0 +1,157 @@
+# WeldWorld: Physical AI for Fabrication Welding
+
+**A working prototype of the full physical-AI loop for a pipe-spool and pressure-vessel weld shop. The sensors on a
+robotic weld cell feed a robotics data platform. A video-curation pipeline turns that data into training clips.
+NVIDIA Cosmos 3 world models then *judge, explain, imagine and multiply* the welds, and a chat copilot sits on top
+that a QA manager can actually use.**
+
+Built on open-source infrastructure: **[Mosaico](https://github.com/mosaico-labs/mosaico)** (robotics data platform),
+**[NVIDIA Cosmos Curator](https://github.com/nvidia-cosmos/cosmos-curator)** (video curation) and
+**[NVIDIA Cosmos 3](https://github.com/NVIDIA/cosmos)** (Reasoner and Generator world models). It runs on a laptop
+(CPU, replay mode) or on a RunPod GPU pod.
+
+> **Data notice.** All weld data in this repository is **synthetic**. It comes from the WeldCell simulator (`collect/`), which is
+> modelled on typical ASME Section IX / B31.3 carbon-steel pipe work (A106 Gr.B, GTAW root, FCAW fill and cap, SAW vessel
+> seams). It contains **no customer data**. Spool, joint and vessel IDs such as `SP-1043` and `V-207` are fictitious.
+
+![Weld Copilot dashboard](docs/img/copilot_dashboard.png)
+<!-- screenshots: docs/img/copilot_dashboard.png, copilot_chat_rootcause.png, whatif_video.png, sim2real.png,
+     mosaico_query.png, curated_dataset.png (produced by the data and app builds) -->
+
+---
+
+## What it does
+
+| You ask the copilot… | What happens under the hood |
+|---|---|
+| *"Which passes broke the WPS this week?"* | Mosaico query over per-pass sequences and their metadata (process, WPS, spool, RT result) |
+| *"Find passes where travel speed went above 7 mm/s"* | **Query by physics**: Mosaico searches inside the 100 Hz sensor streams, not just file names |
+| *"Why did SP-1043 J07 fail RT?"* | WPS-limit check on the synced signals, then the **Cosmos 3 Reasoner** watches the torch-camera clip with sensor context and returns verdict, defect, root cause and action. The replay jumps to the defect |
+| *"What if travel speed drops 20%?"* | **Cosmos 3 Generator** renders a counterfactual video of the same pass |
+| *"Turn this pass into photoreal footage"* | **Cosmos 3 Transfer**: the simulator's edge/depth control video becomes photoreal weld footage (sim→real) |
+| *"How many curated porosity clips do we have for training?"* | **Cosmos Curator** output: 5-second clips, quality-filtered, captioned, embedded and labelled with sensor stats and RT |
+
+## Architecture
+
+```mermaid
+flowchart LR
+  A["1 · COLLECT<br/>WeldCell sim / robot cell<br/>arc V·I · wire feed · gas<br/>robot TCP · IR interpass<br/>torch camera · WPS · RT"]
+  B["2 · STORE & QUERY<br/><b>Mosaico</b><br/>mosaicod + Postgres + object store<br/>one sequence per weld pass"]
+  C["3 · CURATE<br/><b>Cosmos Curator</b><br/>cut · transcode · caption · embed<br/>→ Lance + manifest"]
+  D["4 · WORLD MODELS<br/><b>Cosmos 3</b><br/>Reasoner: QA verdict, root cause<br/>Generator: what-if video<br/>Transfer: sim→real"]
+  E["5 · WELD COPILOT<br/>chat + dashboard<br/>(FastAPI, tool-using agent)"]
+  A -->|"parquet + mp4"| B -->|"query → 5 s clips<br/>+ sensor sidecars"| C -->|"curated clips"| D
+  B -->|"signals, WPS checks"| E
+  C -->|"dataset"| E
+  D <-->|"assess · what-if · sim2real"| E
+```
+
+| Stage | Component | License | Role in the demo |
+|---|---|---|---|
+| 1 Collect | `collect/` WeldCell simulator (+ optional public dataset adapters) | this repo | physically consistent arc, robot and thermal streams, torch-cam render, edge/depth control video, injected defects, RT labels |
+| 2 Store & query | **Mosaico** `mosaicod` + `mosaicolabs` SDK | Apache-2.0 | typed time-series and video per pass, metadata and value queries, synced extraction |
+| 3 Curate | **NVIDIA Cosmos Curator** (Curator Next recipes), or `curate-lite` on CPU | Apache-2.0 | clip cutting, transcode, captioning (Qwen3.8 / Cosmos 3), Cosmos-Embed1 embeddings, Lance table |
+| 4 World models | **NVIDIA Cosmos 3** Nano (Reasoner via vLLM, Generator/Transfer via vLLM-Omni) | NVIDIA OpenMDW-1.1 (model weights) | weld QA verdicts, root cause and WPS findings; what-if and sim→real video |
+| 5 Copilot | `copilot/` FastAPI + web UI; chat via Claude tool use, the Cosmos Reasoner or a scripted router | this repo | the screen the customer sees |
+
+More detail is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): data flow, interfaces, GPU memory layout and ports.
+
+---
+
+## Quickstart A: laptop, CPU only (replay mode)
+
+Needs Python 3.10+ and `make`. Docker is optional and adds a real Mosaico server. [uv](https://docs.astral.sh/uv/) is used if present.
+
+```bash
+git clone <this-repo-url> weldworld && cd weldworld
+make demo-local          # venv → simulate 24 passes → (Mosaico if Docker) → export → curate-lite → copilot
+# open http://localhost:7860
+```
+
+`make demo-local` uses `COSMOS_BACKEND=replay`: world-model answers come from the cache in `data/cache/worldmodels`,
+which a GPU run populates. Without Docker it runs Mosaico in **offline mode**, reading `data/generated/` directly with
+the same API. To show the UI with no pipeline run at all, use `make copilot-fixtures`.
+
+Step by step:
+
+```bash
+make setup-local                 # .venv + requirements.txt, creates .env from configs/demo.env.example
+make infra-up                    # Postgres + mosaicod + MinIO (infra/docker-compose.yml)
+make simulate                    # data/generated/<SP-1043_J07_P3_FCAW>/ …
+make ingest                      # → Mosaico sequences
+make export                      # → data/export/<clip>.mp4 + .json
+make curate                      # BACKEND=lite (default) | curator-next | curator-legacy
+make copilot                     # http://localhost:7860
+make test
+```
+
+Optional keys go in `.env`: `ANTHROPIC_API_KEY` (Claude as the chat agent) and `NVIDIA_API_KEY` (hosted Cosmos 3 on
+build.nvidia.com via `COSMOS_BACKEND=nim`, with no local GPU).
+
+## Quickstart B: RunPod GPU pod (live Cosmos 3 + Curator)
+
+Recommended: **2× H100 80GB** (about $8/hr Secure Cloud) with a **300 GB network volume** at `/workspace`, CUDA 13
+host (driver ≥ 580). Budget: 1× H100 (Reasoner + FP8 Generator with offload).
+
+```bash
+# on the pod (image runpod/pytorch:1.2.0-cu1300-torch2130-ubuntu2404; HTTP ports 7860,9001; TCP 22,6726)
+cd /workspace && git clone <this-repo-url> weld-physical-ai-demo && cd weld-physical-ai-demo
+bash runpod/bootstrap.sh        # once per volume: Postgres, MinIO, mosaicod, Curator (pixi), Cosmos 3 weights, vLLM
+make demo-runpod                # pipeline on GPU → model servers → warm cache → copilot
+bash runpod/status.sh           # prints https://<podid>-7860.proxy.runpod.net
+```
+
+The full guide, covering template choice, the driver/CUDA matrix, GPU costs, volume sizing, ports, secrets and gotchas,
+is in **[runpod/README.md](runpod/README.md)**.
+
+## The demo
+
+The 15-minute talk track, with clicks, chat prompts, "wow" moments, Q&A, a fallback plan and the pilot proposal, is in
+**[docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md)**.
+
+| | |
+|---|---|
+| ![Root cause](docs/img/copilot_chat_rootcause.png) | ![What-if video](docs/img/whatif_video.png) |
+| *Why did J07 fail RT? WPS findings + Cosmos verdict* | *What if travel speed drops 20%?* |
+| ![Sim to real](docs/img/sim2real.png) | ![Mosaico query](docs/img/mosaico_query.png) |
+| *Sim→real with Cosmos 3 Transfer* | *Query by physics in Mosaico* |
+
+---
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `collect/` | shared data contract (`schema.py`), WeldCell simulator, renderer, dataset adapters |
+| `mosaico_io/` | Mosaico ontology, `ingest`, `query`, `export` (online and offline) |
+| `infra/` | `docker-compose.yml` for local Postgres + mosaicod + MinIO |
+| `curate/` | Cosmos Curator configs/runner (`curator-next`, `curator-legacy`) and the CPU `lite` backend |
+| `worldmodels/` | Cosmos 3 Reasoner / Generator / Transfer clients, `local`/`nim`/`replay` backends, `serve/` scripts |
+| `copilot/` | FastAPI app, tool-using agent, dashboard |
+| `runpod/` | `bootstrap.sh`, `start_all.sh`, `stop_all.sh`, `status.sh`, deployment guide |
+| `scripts/run_pipeline.py` | end-to-end runner: collect → ingest → export → curate → warm-cache, with timing and offline/replay flags |
+| `configs/demo.env.example` | every configuration variable, documented |
+| `docs/` | `PLAN.md`, `ARCHITECTURE.md`, `DEMO_SCRIPT.md`, `research/` notes |
+
+## Licenses and third-party components
+
+This repository's code is the demo glue. It **does not vendor** the components below. Each one is installed from its
+upstream source under its own license.
+
+| Component | License | Notes |
+|---|---|---|
+| [Mosaico](https://github.com/mosaico-labs/mosaico) (`mosaicod`, `mosaicolabs` SDK) | Apache-2.0 | daemon binary from GitHub releases / `ghcr.io/mosaico-labs/mosaicod` |
+| [NVIDIA Cosmos Curator](https://github.com/nvidia-cosmos/cosmos-curator) | Apache-2.0 | the models it downloads (Qwen3.8-27B-FP8 captioner, TransNetV2, Cosmos-Embed1) carry their own licenses; see its `MODEL_CARDS.md` |
+| [NVIDIA Cosmos 3](https://huggingface.co/nvidia/Cosmos3-Nano) model weights | NVIDIA OpenMDW-1.1 | commercial use permitted under the agreement's terms |
+| [cosmos-framework](https://github.com/NVIDIA/cosmos-framework) / vLLM / vLLM-Omni | Apache-2.0 | serving stack |
+| MinIO (community edition, built from source) | AGPL-3.0 | used unmodified as a local S3 endpoint for Curator; swap for any S3-compatible store |
+| PostgreSQL | PostgreSQL License | Mosaico catalog |
+
+**Guardrails.** Cosmos ships a safety guardrail model (`nvidia/Cosmos-1.0-Guardrail`) that is **gated** on Hugging
+Face. This demo runs the Generator **with guardrails disabled** (`COSMOS_GUARDRAILS=0`, the default) because it only
+generates industrial weld footage from synthetic inputs. Turn them on for any production or user-facing deployment
+(request access, then set `COSMOS_GUARDRAILS=1`), and review NVIDIA's responsible-use terms.
+
+**Not an inspection system.** WeldWorld is a prototype for decision support. It does not replace code-required
+examination (RT/UT/VT) or the judgement of a Certified Welding Inspector, and nothing it produces is a code acceptance
+decision.
