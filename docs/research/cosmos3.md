@@ -35,7 +35,7 @@ python -m cosmos_framework.scripts.inference --parallelism-preset=latency -i spe
 ```
 Spec examples: cosmos-framework/.agents/skills/cosmos3-inference-transfer/ (SKILL.md + assets/). Also via vLLM-Omni / Diffusers Cosmos3OmniModularPipeline.
 
-## Memory (GiB)  Nano gen BF16 58 (transfer 64) | FP8 44 (50) | FP8+offload 32 (38) | Reasoner 23
+## Memory (GiB) — UNVERIFIED secondary figures; see worldmodels/README.md for the sourced table. Measure on the pod.  Nano gen BF16 58 (transfer 64) | FP8 44 (50) | FP8+offload 32 (38) | Reasoner 23
 H100 80GB: everything fits; Edge i2v 480p 189f ~25s on H100; Nano 720p: minutes (measure).
 Hosted fallback: build.nvidia.com/nvidia/cosmos3-nano (free endpoint), build.nvidia.com/nvidia/cosmos3-nano-reasoner. NIM: nvcr.io/nim/nvidia/cosmos3:2.1.0.
 

@@ -364,9 +364,12 @@ class WorldModels:
             except Exception as e:  # noqa: BLE001
                 note = f"worldmodels.generate failed ({type(e).__name__}: {e}); copilot mock render"
                 log.warning(note)
+        if out is not None and info.get("placeholder") and _mock_placeholders():
+            note = "worldmodels returned a placeholder (no Cosmos backend or cached render); copilot mock render"
+            out = None
         if out is None:
             out = self._mock_video(clip["video_path"], key, f"whatif_{clip['sequence']}_{key}_{seed}", progress)
-            info = {"source": "copilot-mock (no worldmodels)" if gen is None else "copilot-mock (fallback)"}
+            info = {"source": "copilot-mock (no worldmodels)" if gen is None else "copilot-mock (no Cosmos render)"}
         return self._result("what_if", clip, out, info, time.time() - t_start, full_prompt,
                             label=CHANGE_TEMPLATES.get(key or "", {}).get("label") or change, note=note,
                             change=change)
@@ -395,14 +398,17 @@ class WorldModels:
             except Exception as e:  # noqa: BLE001
                 note = f"worldmodels.transfer failed ({type(e).__name__}: {e}); copilot mock render"
                 log.warning(note)
+        if out is not None and info.get("placeholder") and _mock_placeholders():
+            note = "worldmodels returned a placeholder (no Cosmos backend or cached render); copilot mock render"
+            out = None
         if out is None:
             out = self._mock_video(clip["video_path"], "sim2real", f"sim2real_{sequence}_{kind}_{seed}", progress)
-            info = {"source": "copilot-mock (no worldmodels)" if tr is None else "copilot-mock (fallback)"}
+            info = {"source": "copilot-mock (no worldmodels)" if tr is None else "copilot-mock (no Cosmos render)"}
         res = self._result("sim2real", clip, out, info, time.time() - t_start, full_prompt,
                            label=f"Sim→Real ({kind})", note=note)
         from .data import file_url
         res["control_url"] = file_url(ctrl)
-        res["kind"] = kind
+        res["control_kind"] = kind
         return res
 
     # ---- helpers
@@ -482,6 +488,11 @@ class WorldModels:
         if note:
             res["note"] = note
         return res
+
+
+def _mock_placeholders() -> bool:
+    """Replace worldmodels' title-card placeholder videos with a labelled copilot mock render of the real clip."""
+    return os.environ.get("COPILOT_MOCK_PLACEHOLDERS", "1") == "1"
 
 
 def _slug(s: str) -> str:

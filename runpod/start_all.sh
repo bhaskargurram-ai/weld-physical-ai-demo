@@ -7,9 +7,10 @@
 #   bash runpod/start_all.sh copilot    # FastAPI copilot on :7860
 #   bash runpod/start_all.sh --wait ... # block until the model servers answer (up to WAIT_S=1800)
 #
-# GPU layout (auto from GPU count, override with env):
-#   2+ GPUs : GPU0 = Reasoner (+ Curator captioning batches), GPU1 = Generator BF16
-#   1 GPU   : GPU0 = Reasoner (0.35 of memory) + Generator FP8 with layerwise offload
+# GPU layout (auto from GPU count; override REASONER_GPU, REASONER_GPU_UTIL, GENERATOR_GPU,
+# GENERATOR_PRECISION=bf16|fp8|fp8-ckpt, OFFLOAD=0|1 — passed to worldmodels/serve/*.sh):
+#   2+ GPUs : GPU0 = Reasoner (0.45, + Curator captioning batches), GPU1 = Generator BF16
+#   1 GPU   : GPU0 = Reasoner (0.32 of memory) + Generator FP8 with layerwise offload
 #   0 GPUs  : no model servers; copilot uses COSMOS_BACKEND=auto -> nim (NVIDIA_API_KEY) or replay
 # Logs: /workspace/logs/<service>.log   PIDs: /workspace/run/<service>.pid
 set -Eeuo pipefail
@@ -71,7 +72,7 @@ start_mosaicod() {
   [[ -x "${BIN_DIR}/mosaicod" ]] || die "mosaicod missing — run runpod/bootstrap.sh"
   mkdir -p "${MOSAICO_STORE_DIR}"
   # env per docs/research/mosaico.md (MOSAICOD_DB_URL has no credentials; user/password separate)
-  MOSAICOD_DB_URL="${MOSAICOD_DB_URL:-postgresql://localhost:${PG_PORT}/mosaico}" \
+  MOSAICOD_DB_URL="${MOSAICOD_DB_URL:-postgresql://127.0.0.1:${PG_PORT}/mosaico}" \
   MOSAICOD_DB_USER="${MOSAICOD_DB_USER:-postgres}" \
   MOSAICOD_DB_PASSWORD="${MOSAICOD_DB_PASSWORD:?run bootstrap.sh first}" \
   MOSAICOD_STORE_ENDPOINT="${MOSAICOD_STORE_ENDPOINT:-file://${MOSAICO_STORE_DIR}}" \
@@ -100,31 +101,35 @@ start_models() {
   local rs gs; rs="$(find_serve reasoner || true)"; gs="$(find_serve generator || true)"
   [[ -n "$rs" && -n "$gs" ]] || { warn "worldmodels/serve/{reasoner,generator} scripts not found — skipping"; return; }
 
+  # Variable names are the ones worldmodels/serve/{reasoner,generator}.sh read (agent C).
   local r_gpu g_gpu prec offload r_util
   if [[ "$n" -ge 2 ]]; then
     r_gpu="${REASONER_GPU:-0}"; g_gpu="${GENERATOR_GPU:-1}"
-    prec="${GENERATOR_PRECISION:-bf16}"; offload="${GENERATOR_OFFLOAD:-0}"; r_util="${REASONER_GPU_MEM_UTIL:-0.45}"
+    prec="${GENERATOR_PRECISION:-bf16}"; offload="${OFFLOAD:-${GENERATOR_OFFLOAD:-0}}"
+    r_util="${REASONER_GPU_UTIL:-${REASONER_GPU_MEM_UTIL:-0.45}}"
     log "layout: ${n} GPUs -> reasoner GPU${r_gpu} (util ${r_util}), generator GPU${g_gpu} (${prec})"
   else
     r_gpu="${REASONER_GPU:-0}"; g_gpu="${GENERATOR_GPU:-0}"
-    prec="${GENERATOR_PRECISION:-fp8}"; offload="${GENERATOR_OFFLOAD:-1}"; r_util="${REASONER_GPU_MEM_UTIL:-0.35}"
+    prec="${GENERATOR_PRECISION:-fp8}"; offload="${OFFLOAD:-${GENERATOR_OFFLOAD:-1}}"
+    r_util="${REASONER_GPU_UTIL:-${REASONER_GPU_MEM_UTIL:-0.32}}"
     log "layout: 1 GPU -> reasoner (util ${r_util}) + generator ${prec} offload=${offload} share GPU0"
     if pgrep -f cosmos_curator >/dev/null 2>&1; then
       warn "Cosmos Curator is running on the only GPU — start models after curation finishes"
     fi
   fi
 
-  local common=(env "VENV_ROOT=${WS}/venvs" "MODELS_DIR=${MODELS_DIR}" "CUDA_FLAVOR=$(cuda_flavor)"
-                "LOG_DIR=${LOG_DIR}" "HF_HOME=${HF_HOME:-${WS}/.cache/huggingface}")
-  start_bg reasoner "${common[@]}" CUDA_VISIBLE_DEVICES="$r_gpu" PORT="$REASONER_PORT" GPU_MEM_UTIL="$r_util" \
-    bash "$rs"
+  # Foreground mode (no DAEMON=1): the serve scripts exec vllm, so our pid file tracks the server itself.
+  local common=(env -u DAEMON "COSMOS_HOME=${COSMOS_HOME:-${WS}/cosmos}"
+                "HF_HOME=${HF_HOME:-${WS}/.cache/huggingface}" "COSMOS_CUDA_TAG=$(cuda_flavor)")
+  start_bg reasoner "${common[@]}" REASONER_GPU="$r_gpu" REASONER_GPU_UTIL="$r_util" \
+    REASONER_PORT="$REASONER_PORT" bash "$rs"
   # On one GPU let the reasoner claim its share first, otherwise both size their pools off free memory.
   if [[ "$r_gpu" == "$g_gpu" ]]; then
     log "waiting for reasoner before starting the generator on the same GPU"
     wait_http "http://localhost:${REASONER_PORT}/v1/models" "${WAIT_S:-1800}" reasoner || true
   fi
-  start_bg generator "${common[@]}" CUDA_VISIBLE_DEVICES="$g_gpu" PORT="$GENERATOR_PORT" PRECISION="$prec" \
-    OFFLOAD="$offload" bash "$gs"
+  start_bg generator "${common[@]}" GENERATOR_GPU="$g_gpu" GENERATOR_PRECISION="$prec" OFFLOAD="$offload" \
+    GENERATOR_PORT="$GENERATOR_PORT" bash "$gs"
 }
 
 wait_http() {  # wait_http <url> <timeout_s> <label>

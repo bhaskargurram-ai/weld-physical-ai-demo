@@ -29,7 +29,7 @@ row minio "$MINIO_API_PORT" "http://localhost:${MINIO_API_PORT}/minio/health/liv
 row mosaicod "$MOSAICO_PORT"
 row reasoner "$REASONER_PORT" "http://localhost:${REASONER_PORT}/v1/models"
 row generator "$GENERATOR_PORT" "http://localhost:${GENERATOR_PORT}/v1/models"
-row copilot "$COPILOT_PORT" "http://localhost:${COPILOT_PORT}/"
+row copilot "$COPILOT_PORT" "http://localhost:${COPILOT_PORT}/api/health"
 
 hdr "Config"
 printf '  COSMOS_BACKEND=%s  CURATE_BACKEND=%s  COPILOT_LLM=%s  driver=%s (%s wheels)\n' \
@@ -56,7 +56,7 @@ fi
 
 hdr "Disk"
 df -h "$WS" 2>/dev/null | tail -1 | awk '{print "  " $6 ": " $3 " used / " $2 " (" $5 ")"}'
-for p in "$MODELS_DIR" "$CURATOR_DIR" "${WS}/venvs"; do
+for p in "${HF_HOME:-${WS}/.cache/huggingface}" "${COSMOS_HOME:-${WS}/cosmos}" "$CURATOR_DIR" "$CURATOR_WS"; do
   [[ -d "$p" ]] && printf '  %-40s %s\n' "$p" "$(du -sh "$p" 2>/dev/null | cut -f1)"
 done
 

@@ -40,12 +40,14 @@
       <div class="panel-head"><h2>Shop floor</h2><span class="sub" id="floorSource">Cell 2 · robotic</span></div>
       <div class="kpis" id="floorKpis"></div>
       <div class="filters">
-        <div class="seg" id="fProcess">
-          <button data-v="" class="on">All</button><button data-v="GTAW">GTAW</button><button data-v="FCAW">FCAW</button>
+        <div class="seg full" id="fProcess">
+          <button data-v="" class="on">All processes</button><button data-v="GTAW">GTAW</button><button data-v="FCAW">FCAW</button>
         </div>
-        <select id="fSpool" aria-label="Spool"><option value="">All spools</option></select>
-        <select id="fRt" aria-label="RT result"><option value="">RT: any</option><option value="reject">RT reject</option>
-          <option value="accept">RT accept</option><option value="pending">RT pending</option></select>
+        <div class="frow">
+          <select id="fSpool" aria-label="Spool"><option value="">All spools</option></select>
+          <select id="fRt" aria-label="RT result"><option value="">RT: any</option><option value="reject">RT reject</option>
+            <option value="accept">RT accept</option><option value="pending">RT pending</option></select>
+        </div>
         <label class="toggle"><input type="checkbox" id="fDefect"><span></span>Defects / WPS breaks only</label>
       </div>
       <div class="pass-list" id="passList"></div>

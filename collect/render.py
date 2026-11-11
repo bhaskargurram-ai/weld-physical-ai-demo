@@ -68,7 +68,7 @@ def _noise_tile(rng, h, w, scales=((4, 0.5), (16, 0.3), (64, 0.2))) -> np.ndarra
 
 def _lut(values: np.ndarray, x0: float, dx: float, coords: np.ndarray) -> np.ndarray:
     """Fast 1-D lookup (linear, clamped) via cv2.remap on a 1-row image."""
-    img = np.ascontiguousarray(values.astype(F32)[None, :])
+    img = np.ascontiguousarray(values.astype(F32)[None])   # (1,N) or (1,N,C)
     mx = ((coords - x0) / dx).astype(F32)
     my = np.zeros_like(mx)
     return cv2.remap(img, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
@@ -96,13 +96,15 @@ class Camera:
     def __init__(self, R: float, process: str, w=W, h=H):
         self.R = R
         self.w, self.h = w, h
-        fov = 58.0 if process != "SAW" else 64.0
+        fov = 54.0 if process != "SAW" else 60.0
         self.f = (w / 2) / math.tan(math.radians(fov / 2))
-        dist, elev = (95.0, 40.0) if process != "SAW" else (150.0, 47.0)
+        # side-mounted weld camera: behind the torch, yawed off the seam, looking down at the pool
+        dist, elev, az = (105.0, 34.0, 28.0) if process != "SAW" else (135.0, 36.0, 26.0)
         self.A = np.array([0.0, 0.0, R])                       # arc point (TDC)
-        el = math.radians(elev)
-        self.C = self.A + np.array([6.0, -dist * math.cos(el), dist * math.sin(el)])
-        target = self.A + np.array([0.0, 16.0 if process != "SAW" else 28.0, 0.0])
+        el, az = math.radians(elev), math.radians(az)
+        back = np.array([-math.sin(az), -math.cos(az), 0.0])
+        self.C = self.A + dist * (math.cos(el) * back + np.array([0, 0, math.sin(el)]))
+        target = self.A + np.array([4.0, 9.0 if process != "SAW" else 22.0, -1.0])
         fwd = target - self.C
         self.fwd = fwd / np.linalg.norm(fwd)
         right = np.cross(self.fwd, [0, 0, 1.0])
@@ -330,7 +332,7 @@ class PassScene:
         # stuck spatter globules beside the bead (FCAW)
         if self.process == "FCAW":
             inst = 1.0 + 3.0 * float(any(d["defect"] == "arc_instability" for d in self.defects))
-            n_sp = int((self.u_grid[-1] - self.u0) * 0.35 * inst)
+            n_sp = int((self.u_grid[-1] - self.u0) * 0.12 * inst)
             us = rng.uniform(self.u0, self.u_grid[-1], n_sp)
             sides = rng.choice([-1, 1], n_sp)
             vs = sides * (self.Wt + rng.exponential(3.0, n_sp) + 0.5)
@@ -399,7 +401,7 @@ def _torch_layer(cam: Camera, process: str, push_deg: float, ctwd: float):
         shade = (0.35 + 0.65 * np.sin(np.pi * xn) ** 0.8)[None, :].repeat(h, 0)
         ys = np.arange(h, dtype=F32)[:, None].repeat(w, 1)
         ymax = hull[:, 0, 1].max()
-        rim_m = np.exp(-np.maximum(ymax - ys, 0) / 18.0) * rim_strength
+        rim_m = np.exp(-np.maximum(ymax - ys, 0) / (18.0 * w / 960)) * rim_strength
         sel = mm & (z.mean() < depth)
         alpha[sel] = 1.0
         albedo[sel] = np.array(color, F32) * shade[sel, None]
@@ -416,8 +418,8 @@ def _torch_layer(cam: Camera, process: str, push_deg: float, ctwd: float):
         cone(22, 65, 9.0, 11.0, (0.09, 0.09, 0.10), 0.4)                 # torch body
         cone(1.2, 4.6, 0.35, 1.2, (0.55, 0.55, 0.6), 1.5)                # tungsten
     else:  # SAW
-        cone(8, 70, 4.0, 5.0, (0.55, 0.35, 0.2), 0.3)                    # contact tube
-        cone(30, 80, 9.0, 10.0, (0.15, 0.16, 0.17), 0.1)                 # flux hose
+        cone(6, 75, 2.6, 3.2, (0.55, 0.35, 0.2), 0.3)                    # contact tube
+        cone(40, 90, 6.5, 7.5, (0.15, 0.16, 0.17), 0.1)                  # flux hose / nozzle
     wire_top, _ = cam.project(A + axis * (ctwd - 3.0))
     wire_bot, _ = cam.project(A)
     return alpha, albedo, rim, depth, (wire_top, wire_bot)
@@ -427,9 +429,12 @@ def _torch_layer(cam: Camera, process: str, push_deg: float, ctwd: float):
 
 
 class Renderer:
-    def __init__(self, scene: PassScene, w=W, h=H, fps=CAMERA_FPS):
+    def __init__(self, scene: PassScene, w=W, h=H, fps=CAMERA_FPS, scale: float = 2 / 3):
         self.sc = sc = scene
-        self.w, self.h, self.fps = w, h, fps
+        self.ow, self.oh = w, h                      # output size
+        w, h = int(round(w * scale)) // 2 * 2, int(round(h * scale)) // 2 * 2
+        self.w, self.h, self.fps = w, h, fps        # internal render size
+        self.px = w / 960.0                          # pixel-size scale for screen-space effects
         proc = sc.process
         # the camera rides at the current layer level so the arc stays in the same place
         R_eff = sc.R
@@ -449,16 +454,21 @@ class Renderer:
         self.base_tex = _noise_tile(rng, 512, 512)
         self.scale_tex = _noise_tile(rng, 256, 256, ((3, 0.6), (12, 0.4)))
         self.grain_tex = _noise_tile(rng, 256, 256, ((1, 0.7), (3, 0.3)))
-        self.fume_tex = _noise_tile(rng, h, w, ((24, 0.5), (60, 0.35), (140, 0.15)))
+        self.fume_tex = cv2.GaussianBlur(_noise_tile(rng, h, w, ((24, 0.5), (60, 0.35), (140, 0.15))), (0, 0), 6 * w / 960)
         self.pool_tex = _noise_tile(rng, 128, 128, ((4, 0.6), (16, 0.4)))
-        self.sensor_noise = [rng.normal(0, 1, (h, w)).astype(F32) for _ in range(4)]
+        self.sensor_noise = [rng.normal(0, 1, (self.oh, self.ow)).astype(F32) for _ in range(4)]
         # static radial maps
         self.dist_arc = np.sqrt(self.U ** 2 + self.V ** 2).astype(F32)
+        oys, oxs = np.mgrid[0:self.oh, 0:self.ow].astype(F32)
+        self.vignette = (1.0 - 0.5 * (((oxs - self.ow / 2) / (self.ow / 2)) ** 2 +
+                                      ((oys - self.oh / 2) / (self.oh / 2)) ** 2) ** 1.3).clip(0.25, 1)
         ys, xs = np.mgrid[0:h, 0:w].astype(F32)
-        self.vignette = (1.0 - 0.55 * (((xs - w / 2) / (w / 2)) ** 2 + ((ys - h / 2) / (h / 2)) ** 2) ** 1.2).clip(0.2, 1)
+        self.vignette_in = cv2.resize(self.vignette, (w, h), interpolation=cv2.INTER_AREA)
         self.arc_px = cam.project(cam.A + np.array([0, 0, 1.0]))[0]
         ax, ay = self.arc_px
         self.r_arc_px = np.sqrt((xs - ax) ** 2 + (ys - ay) ** 2).astype(F32)
+        above = np.clip((ay - ys) / (0.6 * h), 0, 1)
+        self.fume_mask = (np.exp(-np.abs(xs - ax) / (0.22 * w)) * above ** 0.7 * np.exp(-self.r_arc_px / (0.45 * w))).astype(F32)
         # torch hardware
         push = float(sc.meta.get("push_angle_deg", 10.0))
         ctwd = float(sc.meta.get("ctwd_mm", 15.0))
@@ -478,14 +488,34 @@ class Renderer:
         self.exposure = 1.25 if proc == "SAW" else 1.0
         # flux pile (SAW) in torch frame
         if proc == "SAW":
-            fu, fv = self.U, self.V
-            ahead = np.clip((fu + 38) / 10, 0, 1) * np.clip((150 - fu) / 20, 0, 1)
-            self.flux_h = (9.0 * ahead * np.exp(-(fv / 30.0) ** 4)).astype(F32)
-            gy, gx = np.gradient(cv2.GaussianBlur(self.flux_h, (0, 0), 3))
-            # convert screen gradients to surface gradients approx (u ~ -y, v ~ x)
-            self.flux_gu = (-gy * 0.25).astype(F32)
-            self.flux_gv = (gx * 0.25).astype(F32)
+            fu, fv = self.U.astype(np.float64), self.V.astype(np.float64)
+            sw = 16.0                                            # ridge half-width scale [mm]
+            ahead = 1 / (1 + np.exp(-(fu + 32.0) / 3.0))         # flux recovered ~32 mm behind arc
+            prof = np.exp(-(fv / sw) ** 2)
+            hgt = 7.0 * ahead * prof
+            self.flux_h = hgt.astype(F32)
+            self.flux_gu = (7.0 * prof * ahead * (1 - ahead) / 3.0).astype(F32)
+            self.flux_gv = (hgt * (-2 * fv / sw ** 2)).astype(F32)
         self.frame_idx = 0
+        self.steel_tint = np.array([1.0, 1.02, 1.07], F32)
+        self.spec_tint = np.array([1.0, 0.92, 0.82], F32)
+        self.pool_hot = np.array([1.0, 0.80, 0.45], F32)
+        self.pool_rim = np.array([1.0, 0.45, 0.10], F32)
+        Tg = np.arange(0, 2000, 2.0, dtype=F32)
+        self.bb_lut = blackbody(Tg)                      # (N, 3)
+        # static ROI that contains the largest possible pool
+        Lmax = {"GTAW": 5.5, "FCAW": 9.0, "SAW": 18.0}[proc] * 1.5 * 1.4 + 2
+        pwm = max(3.0, float(np.max(sc.b_u))) * 1.6 * 1.3 + 2
+        roi = (np.abs(self.V) < pwm) & (self.U > -Lmax) & (self.U < Lmax) & self.hit
+        ys_, xs_ = np.nonzero(roi)
+        if len(ys_):
+            self.pool_roi = (int(ys_.min()), int(ys_.max()) + 1, int(xs_.min()), int(xs_.max()) + 1)
+        else:
+            self.pool_roi = (0, h, 0, w)
+        pos = np.clip(self.sensor_noise[0] * 2.6, 0, 255).astype(np.uint8)
+        neg = np.clip(-self.sensor_noise[0] * 2.6, 0, 255).astype(np.uint8)
+        self.noise8 = [(np.roll(pos, k * 7, axis=1)[..., None].repeat(3, -1),
+                        np.roll(neg, k * 7, axis=1)[..., None].repeat(3, -1)) for k in range(4)]
 
     # --------------------------------------------------------------------------
     def render(self, tf: float):
@@ -519,15 +549,16 @@ class Renderer:
         q = np.clip(va / np.maximum(b, 0.5), -1.5, 1.5)
         prof = np.clip(1 - q * q, 0, 1)
         pitch = sc.ripple_pitch
-        phase = (ua + 0.035 * va * va) * (2 * np.pi / pitch)
+        phase = (ua + 0.035 * va * va + 0.25 * np.sin(ua * 0.41)) * (2 * np.pi / pitch)
         rip = np.sin(phase)
-        rip_amp = 0.10 if proc != "SAW" else 0.04
+        rip_amp = (0.035 if proc != "SAW" else 0.02) * (0.6 + 0.8 * np.sin(ua * 0.23) ** 2)
         h_bead = level + crown * prof + rip_amp * rip * prof
         gv_bead = crown * (-2 * q / np.maximum(b, 0.5)) * (np.abs(q) < 1) + rip_amp * np.cos(phase) * 0.07 * va * (2 * np.pi / pitch) * prof
         gu_bead = rip_amp * np.cos(phase) * (2 * np.pi / pitch) * prof
         in_bead = (np.abs(q) < 1.0).astype(F32)
-        dep = (tdep < tf).astype(F32) * (tdep > -100).astype(F32)       # deposited behind torch
-        bead_m = dep * np.clip((1.0 - np.abs(q)) * 6, 0, 1)
+        ts_now = max(float(np.interp(tf, sc.t, sc.TS)), 0.3)
+        dep = np.clip((tf - tdep) * F32(ts_now / 2.5), 0, 1) * (tdep > -100).astype(F32)  # deposited behind torch
+        bead_m = dep * np.clip((1.0 - np.abs(q)) * 4, 0, 1)
         # undercut notch at the toes / cold-lap crevice on one side
         toe = np.exp(-(((av_ - b - 0.35) / 0.45) ** 2)).astype(F32)
         h_bead_full = np.maximum(h_bead, h_prev)
@@ -540,9 +571,10 @@ class Renderer:
         mx = (ua - F32(sc.u0)) / F32(sc.tex_res)
         my = (va - F32(sc.tex_v0)) / F32(sc.tex_res)
         dth = _sample(sc.tex_dh, mx, my)
-        h = h + dth * np.maximum(dep, (av_ > sc.Wt).astype(F32))
-        gu = gu + _sample(sc.tex_gu, mx, my)
-        gv = gv + _sample(sc.tex_gv, mx, my)
+        gate = np.maximum(dep, (av_ > sc.Wt).astype(F32))
+        h = h + dth * gate
+        gu = gu + _sample(sc.tex_gu, mx, my) * gate
+        gv = gv + _sample(sc.tex_gv, mx, my) * gate
         pore_dark = _sample(sc.tex_dark, mx, my) * dep
         t_since = np.maximum(tf - tdep, 0)
         crack = _sample(sc.tex_crack, mx, my) * dep * np.clip((t_since - 1.2) / 1.0, 0, 1) * (crk_u > 0)
@@ -551,9 +583,11 @@ class Renderer:
         bt_hole = np.clip((bt_hole - 0.25) * 3.0, 0, 1)
 
         # ---- temperature field
-        tau_c = {"GTAW": 1.1, "FCAW": 2.2, "SAW": 3.5}[proc]
-        T_bead = sc.T_ip + (1480 - sc.T_ip) * np.exp(-t_since / tau_c) * (1 - 0.3 * q * q)
-        T = np.where(dep > 0, T_bead, sc.T_ip) * np.maximum(in_bead, 0.0) + sc.T_ip * (1 - in_bead)
+        tau_c = {"GTAW": 1.8, "FCAW": 3.2, "SAW": 4.5}[proc]
+        t_pool = {"GTAW": 5.5, "FCAW": 9.0, "SAW": 18.0}[proc] / max(float(np.median(sc.TS)), 0.5)
+        T_bead = sc.T_ip + (1480 - sc.T_ip) * np.exp(-np.maximum(t_since - 0.6 * t_pool, 0) / tau_c) * \
+            (1 - 0.45 * q * q) * np.clip(t_since * ts_now / 5.0, 0.5, 1)
+        T = sc.T_ip + (T_bead - sc.T_ip) * bead_m
         T = T.astype(F32)
         if arc_on:
             haz = 950.0 * min(P_rel, 1.6) * np.exp(-self.dist_arc / (5.0 + 2.5 * min(P_rel, 1.5)))
@@ -579,44 +613,35 @@ class Renderer:
         ndla = np.clip((self.an - gu * self.au - gv * self.av) / norm, 0, 1)
         ndha = np.clip((self.ahn - gu * self.ahu - gv * self.ahv) / norm, 0, 1)
 
-        # albedo layers
-        bt_ = self.base_tex
-        btx = (ua * 1.6) % 512
-        bty = (va * 1.6) % 512
-        base_n = _sample(bt_, btx.astype(F32), bty.astype(F32), wrap=True)
-        scl = _sample(self.scale_tex, ((ua * 0.9) % 256).astype(F32), ((va * 0.9) % 256).astype(F32), wrap=True)
-        mill = np.stack([0.11 + 0.05 * base_n, 0.115 + 0.05 * base_n, 0.13 + 0.06 * base_n], -1) * (0.7 + 0.5 * scl[..., None])
+        # albedo: neutral steel luminance + coloured bead layer
+        base_n = _sample(self.base_tex, ua * F32(1.6), va * F32(1.6), wrap=True)
+        scl = _sample(self.scale_tex, ua * F32(0.9), va * F32(0.9), wrap=True)
         ground_zone = np.clip((sc.Wt + 9.0 - av_) / 3.0, 0, 1)
-        grind = (0.32 + 0.12 * np.sin(ua * 7.0 + base_n * 6.0))[..., None] * np.array([1.0, 1.0, 1.03], F32)
-        alb = mill * (1 - ground_zone[..., None]) + grind * ground_zone[..., None]
-        bevel_c = (0.42 + 0.1 * base_n)[..., None] * np.array([1.0, 0.98, 0.95], F32)
-        alb = alb * (1 - bevel[..., None]) + bevel_c * bevel[..., None]
-        prev_c = (0.22 + 0.06 * np.sin((ua + 0.035 * va * va) * 2 * np.pi / pitch))[..., None] * np.array([0.95, 0.95, 1.0], F32)
-        alb = alb * (1 - prevb[..., None]) + prev_c * prevb[..., None]
-        alb = alb * (1 - gap[..., None])
-        spec_k = 0.25 * ground_zone + 0.5 * bevel + 0.12
+        A = (0.10 + 0.05 * base_n) * (0.7 + 0.5 * scl) * (1 - ground_zone) + \
+            (0.24 + 0.04 * np.sin(va * 9.0 + base_n * 9.0) + 0.06 * base_n) * ground_zone
+        A = A * (1 - bevel) + (0.20 + 0.08 * base_n) * bevel
+        A = A * (1 - prevb) + (0.20 + 0.05 * np.sin(phase)) * prevb
+        A = A * (1 - gap) * (1 - bead_m)
+        dark = (1 - 0.92 * pore_dark) * (1 - 0.95 * crack) * (1 - bt_hole)
+        spec_k = 0.15 * ground_zone + 0.15 * bevel + 0.08
 
         if proc == "FCAW":
-            slag = np.array([0.085, 0.07, 0.06], F32) * (0.8 + 0.4 * base_n[..., None])
-            bead_c, bead_spec = slag, 0.55
+            bead_c = np.array([0.085, 0.07, 0.06], F32)[None, None] * (0.8 + 0.4 * base_n)[..., None]
+            bead_spec = 0.55
         elif proc == "GTAW":
-            tint = np.clip(1 - np.abs(q), 0, 1)[..., None]
-            silver = np.array([0.55, 0.55, 0.58], F32)
+            aq = np.abs(q)
+            tint = np.clip(1 - aq, 0, 1)[..., None]
+            band = np.clip(aq * 1.4, 0, 1)[..., None]
             straw = np.array([0.55, 0.42, 0.18], F32)
             blue = np.array([0.18, 0.22, 0.45], F32)
-            band = np.clip(np.abs(q) * 1.4, 0, 1)[..., None]
-            bead_c = silver * tint + (straw * (1 - band) + blue * band) * (1 - tint)
+            bead_c = np.array([0.55, 0.55, 0.58], F32) * tint + (straw + (blue - straw) * band) * (1 - tint)
             bead_spec = 0.9
         else:
             peel = np.clip((-self.U - 55) / 10, 0, 1)[..., None]
             slag = np.array([0.11, 0.09, 0.08], F32) * (0.8 + 0.4 * base_n[..., None])
-            metal = np.array([0.42, 0.42, 0.45], F32)
-            bead_c = slag * (1 - peel) + metal * peel
+            bead_c = slag + (np.array([0.42, 0.42, 0.45], F32) - slag) * peel
             bead_spec = 0.6
-        bm = bead_m[..., None]
-        alb = alb * (1 - bm) + bead_c * bm
-        alb = alb * (1 - 0.92 * pore_dark[..., None]) * (1 - 0.95 * crack[..., None])
-        alb = alb * (1 - bt_hole[..., None])
+        alb = (A * dark)[..., None] * self.steel_tint + bead_c * (bead_m * dark)[..., None]
         spec_k = spec_k * (1 - bead_m) + bead_spec * bead_m
 
         arc_I = 0.0
@@ -626,21 +651,26 @@ class Renderer:
                 flick *= 0.55 ** min(fs["sc"], 2)
             arc_I = max(0.15, P_rel * flick) * (3.2 if proc != "SAW" else 0.0)
         light = self.att * (ndl * arc_I) + self.ambient * ndla
-        lit = alb * light[..., None]
-        spec = (self.att * arc_I * ndh ** 40 + self.ambient * 0.6 * ndha ** 30) * spec_k
-        img = lit + spec[..., None] * np.array([1.0, 0.92, 0.82], F32)
+        spec = (self.att * self.att * arc_I * 1.6 * ndh ** 40 + self.ambient * 0.6 * ndha ** 30) * spec_k
+        img = alb * light[..., None] + spec[..., None] * self.spec_tint
 
-        # incandescence + pool
-        img += blackbody(T) * (1 - bt_hole[..., None] * 0.3)
+        # incandescence (blackbody LUT)
+        img += _lut(self.bb_lut, 0.0, 2.0, T)
+        # weld pool (only inside its static ROI)
         if arc_on:
-            pt = _sample(self.pool_tex, ((self.U * 3 + tf * 60) % 128).astype(F32),
-                         ((self.V * 3 + tf * 23) % 128).astype(F32), wrap=True)
-            pool_col = np.array([1.0, 0.82, 0.5], F32) * (3.0 + 2.0 * pt[..., None])
-            bub = 0.0
+            y0, y1, x0, x1 = self.pool_roi
+            U, Vv = self.U[y0:y1, x0:x1], self.V[y0:y1, x0:x1]
+            pr = pool_r[y0:y1, x0:x1]
+            pm = pool[y0:y1, x0:x1][..., None]
+            pt = _sample(self.pool_tex, U * F32(3) + F32(tf * 60 % 128), Vv * F32(3) + F32(tf * 23 % 128), wrap=True)
+            edge_f = np.clip(pr, 0, 1)[..., None]
+            hot = self.pool_hot + (self.pool_rim - self.pool_hot) * edge_f
+            refl = np.exp(-((U + 1.0) ** 2 + Vv ** 2) / 2.0)[..., None] * 3.0
+            pool_col = hot * (1.1 + 1.1 * pt[..., None]) + refl
             if any(d["defect"] == "porosity" for d in fs["active"]):
-                bub = (pt > 0.62).astype(F32) * 0.85
-            pool_col = pool_col * (1 - bub)[..., None] if np.ndim(bub) else pool_col
-            img = img * (1 - pool[..., None]) + pool_col * pool[..., None] * min(1.6, 0.6 + 0.5 * P_rel)
+                pool_col = pool_col * (1 - (pt > 0.62).astype(F32) * 0.85)[..., None]
+            sub = img[y0:y1, x0:x1]
+            img[y0:y1, x0:x1] = sub * (1 - pm) + pool_col * pm * min(1.6, 0.6 + 0.5 * P_rel)
 
         if proc == "SAW":
             img = self._flux(img, ua, va, tf, fs)
@@ -658,9 +688,10 @@ class Renderer:
         if arc_on and proc != "SAW":
             self._wire(img, fs)
             ra = self.r_arc_px
-            core = (3.5 + 1.2 * P_rel)
-            glow = (np.exp(-(ra / core) ** 2) * 18.0 + np.exp(-ra / (14 + 6 * P_rel)) * 1.4 +
-                    np.exp(-ra / 90.0) * 0.18) * arc_I / 3.2
+            px = self.px
+            core = (4.0 + 1.5 * P_rel) * px
+            glow = (np.exp(-(ra / core) ** 2) * 9.0 + np.exp(-ra / ((12 + 5 * P_rel) * px)) * 0.9 +
+                    np.exp(-ra / (110.0 * px)) * 0.10) * arc_I / 3.2
             tint = np.array([0.95, 0.95, 1.0], F32) if proc == "GTAW" else np.array([1.0, 0.9, 0.75], F32)
             img += glow[..., None] * tint
             if proc == "FCAW":
@@ -670,42 +701,47 @@ class Renderer:
         # bloom
         img = self._bloom(img)
         # tonemap + camera
-        out = 1.0 - np.exp(-img * self.exposure)
-        out = out * self.vignette[..., None]
-        out = np.clip(out, 0, 1) ** (1 / 2.2)
-        out += self.sensor_noise[self.frame_idx % 4][..., None] * 0.012
-        rgb = (np.clip(out, 0, 1) * 255).astype(np.uint8)
+        out = (1.0 - np.exp(-img * self.exposure)) * self.vignette_in[..., None]
+        out = cv2.pow(np.clip(out, 0, 1), 0.68) * F32(255)     # display gamma (keeps shadows dark)
+        rgb = cv2.resize(out.astype(np.uint8), (self.ow, self.oh), interpolation=cv2.INTER_CUBIC)
+        npos, nneg = self.noise8[self.frame_idx % 4]
+        rgb = cv2.subtract(cv2.add(rgb, npos), nneg)
 
         # control: depth (inverse depth, near = bright)
-        z = self.Z - h * 0.8 / self.cos_view
+        z = self.Z - h * 2.5 / self.cos_view          # relief exaggerated for the control signal
         if proc == "SAW":
             z = z - self.flux_h * 0.8 / self.cos_view
         z = np.minimum(z, self.t_depth)
         zn, zf = 30.0, 450.0
         inv = (1 / np.clip(z, zn, zf) - 1 / zf) / (1 / zn - 1 / zf)
         depth8 = (np.clip(inv, 0, 1) ** 0.6 * 255).astype(np.uint8)
+        depth8 = cv2.resize(depth8, (self.ow, self.oh), interpolation=cv2.INTER_LINEAR)
 
         # control: edges from a flat-lit geometry render (no glow / noise)
-        geo = (alb.mean(-1) * (0.35 + 0.65 * ndla) * self.hitf + 0.6 * self.t_alpha * (0.3 + 0.7 * self.t_rim)
-               + 0.8 * pool * (1 - self.t_alpha))
+        lum = alb.mean(-1)
+        geo = np.clip(0.12 + 1.6 * lum, 0, 1) * (0.25 + 0.75 * ndla) * self.hitf
+        geo = geo + 0.25 * np.clip(-h, 0, 12) / 12 * self.hitf          # groove depth cue
+        geo = geo * (1 - pool) + 0.95 * pool
         if proc == "SAW":
-            geo = geo * (1 - self.flux_m) + self.flux_m * (0.3 + 0.4 * self.flux_shade)
-        geo8 = (np.clip(geo / max(float(np.percentile(geo, 99.5)), 1e-3), 0, 1) * 255).astype(np.uint8)
-        geo8 = cv2.GaussianBlur(geo8, (3, 3), 0)
-        edge8 = cv2.Canny(geo8, 30, 90)
+            geo = geo * (1 - self.flux_m) + self.flux_m * (0.35 + 0.4 * self.flux_shade)
+        geo = geo * (1 - self.t_alpha) + self.t_alpha * (0.5 + 0.4 * self.t_rim)
+        geo = cv2.resize(geo.astype(F32), (self.ow, self.oh), interpolation=cv2.INTER_LINEAR)
+        geo8 = (np.clip(geo, 0, 1) * 255).astype(np.uint8)
+        geo8 = cv2.GaussianBlur(geo8, (5, 5), 0)
+        edge8 = cv2.Canny(geo8, 12, 36)
         self.frame_idx += 1
         return rgb, edge8, depth8
 
     # -------------------------------------------------------------------- effects
     def _flux(self, img, ua, va, tf, fs):
         fh = self.flux_h
-        grain = _sample(self.grain_tex, ((ua * 4) % 256).astype(F32), ((va * 4) % 256).astype(F32), wrap=True)
+        grain = _sample(self.grain_tex, ua * F32(4), va * F32(4), wrap=True)
         gu, gv = self.flux_gu, self.flux_gv
         norm = np.sqrt(1 + gu * gu + gv * gv)
         nd = np.clip((self.an - gu * self.au - gv * self.av) / norm, 0, 1)
         shade = (0.25 + 0.75 * nd) * (0.55 + 0.6 * grain)
-        col = np.array([0.36, 0.30, 0.22], F32) * shade[..., None] * self.ambient * 1.6
-        m = np.clip(fh / 1.5, 0, 1)
+        col = np.array([0.36, 0.31, 0.25], F32) * shade[..., None] * self.ambient * 1.4
+        m = np.clip((fh + 0.9 * (grain - 0.5)) / 1.2, 0, 1)
         # glow seeping through thin flux near the arc
         glow = np.exp(-(self.dist_arc / 9.0) ** 2) * (fs["I"] > 8) * (0.6 + 0.4 * grain)
         col += (glow * 0.9)[..., None] * np.array([1.0, 0.45, 0.1], F32)
@@ -720,55 +756,56 @@ class Renderer:
             # filler rod dabbed in from the leading edge when wire feed is on
             if fs["wfs"] > 0.2:
                 ax, ay = self.arc_px
-                cv2.line(img, (int(ax - 230), int(ay - 150)), (int(ax - 6), int(ay - 14)), (0.35, 0.33, 0.3), 5, cv2.LINE_AA)
-                cv2.circle(img, (int(ax - 7), int(ay - 14)), 4, (3.0, 2.0, 1.0), -1, cv2.LINE_AA)
+                p = self.px
+                cv2.line(img, (int(ax - 230 * p), int(ay - 150 * p)), (int(ax - 6 * p), int(ay - 14 * p)),
+                         (0.35, 0.33, 0.3), max(2, int(5 * p)), cv2.LINE_AA)
+                cv2.circle(img, (int(ax - 7 * p), int(ay - 14 * p)), max(2, int(4 * p)), (3.0, 2.0, 1.0), -1, cv2.LINE_AA)
             return
-        cv2.line(img, (int(x0), int(y0)), (int(x1), int(y1)), (0.9, 0.75, 0.6), 3, cv2.LINE_AA)
+        th = max(2, int(round(3 * self.px)))
+        cv2.line(img, (int(x0), int(y0)), (int(x1), int(y1)), (0.9, 0.75, 0.6), th, cv2.LINE_AA)
         cv2.line(img, (int(x0 + (x1 - x0) * 0.6), int(y0 + (y1 - y0) * 0.6)), (int(x1), int(y1)),
-                 (3.5, 2.2, 1.0), 3, cv2.LINE_AA)
+                 (3.5, 2.2, 1.0), th, cv2.LINE_AA)
 
     def _fume(self, img, tf, arc_I):
         h, w = self.h, self.w
         off = int(tf * 45) % h
         f = np.roll(self.fume_tex, -off, axis=0)
         f = np.roll(f, int(12 * math.sin(tf * 0.7)), axis=1)
-        ax, ay = self.arc_px
-        mask = np.exp(-self.r_arc_px / 260.0)
-        dens = np.clip(f - 0.35, 0, 1) * mask * 0.35 * arc_I / 3.2
+        dens = np.clip(f - 0.45, 0, 1) * self.fume_mask * 0.22 * arc_I / 3.2
         img += dens[..., None] * np.array([1.0, 0.72, 0.45], F32)
 
     def _spatter(self, img, fs, arc_on):
         sc, rng = self.sc, self.sc.rng
         dt = 1.0 / self.fps
-        rate = {"GTAW": 0.0, "FCAW": 14.0, "SAW": 0.0}[sc.process]
+        rate = {"GTAW": 0.0, "FCAW": 2.2, "SAW": 0.0}[sc.process]   # particles per frame
         if arc_on and rate:
-            rate *= 1 + 1.5 * fs["sc"] + 6.0 * fs["vstd"] / max(sc.V_nom, 1) * 4
+            rate *= 1 + 1.2 * fs["sc"] + 8.0 * fs["vstd"] / max(sc.V_nom, 1)
             if any(d["defect"] in ("arc_instability", "porosity") for d in fs["active"]):
                 rate *= 2.5
             n = rng.poisson(rate)
             if n:
                 ang = rng.uniform(-math.pi * 0.95, -math.pi * 0.05, n)
-                spd = rng.uniform(250, 1500, n)
+                spd = rng.uniform(250, 1400, n) * self.px
                 ax, ay = self.arc_px
                 new = np.column_stack([ax + rng.normal(0, 3, n), ay + rng.normal(0, 3, n),
                                        np.cos(ang) * spd, np.sin(ang) * spd,
-                                       np.zeros(n), rng.uniform(0.08, 0.45, n)]).astype(F32)
+                                       np.zeros(n), rng.uniform(0.06, 0.3, n)]).astype(F32)
                 self.parts = np.vstack([self.parts, new])
         if len(self.parts) == 0:
             return
         p = self.parts
         p[:, 0] += p[:, 2] * dt
         p[:, 1] += p[:, 3] * dt
-        p[:, 3] += 1800 * dt
+        p[:, 3] += 1800 * dt * self.px
         p[:, 4] += dt
         p = p[(p[:, 4] < p[:, 5]) & (p[:, 0] > -50) & (p[:, 0] < self.w + 50) & (p[:, 1] < self.h + 50)]
         self.parts = p
         for x, y, vx, vy, age, life in p:
             k = max(0.0, 1 - age / life)
-            x0, y0 = x - vx * dt * 0.5, y - vy * dt * 0.5
+            x0, y0 = x - vx * dt * 0.3, y - vy * dt * 0.3
             k = float(k)
             col = (3.0 * k, 2.0 * k ** 1.3, 0.8 * k ** 2)
-            cv2.line(img, (int(x0), int(y0)), (int(x), int(y)), col, 2 if k > 0.6 else 1, cv2.LINE_AA)
+            cv2.line(img, (int(x0), int(y0)), (int(x), int(y)), col, 1, cv2.LINE_AA)
 
     def _bloom(self, img):
         bright = np.clip(img - 0.9, 0, None)

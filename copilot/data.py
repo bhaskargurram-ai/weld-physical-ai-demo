@@ -470,14 +470,15 @@ def _cached(key: str, ttl: float, fn):
 
 def mosaico_health() -> dict:
     if os.environ.get("MOSAICO_OFFLINE", "") in ("1", "true"):
-        return {"status": "offline", "detail": "MOSAICO_OFFLINE=1 (reading data/generated)"}
+        return {"status": "offline", "detail": "MOSAICO_OFFLINE=1 (reading data/generated)", "short": "offline mode · data/generated"}
     host = os.environ.get("MOSAICO_HOST", "localhost")
     port = int(os.environ.get("MOSAICO_PORT", "6726"))
 
     def probe():
         try:
             with socket.create_connection((host, port), timeout=0.3):
-                return {"status": "ok", "detail": f"mosaicod {host}:{port}"}
+                return {"status": "ok", "detail": f"mosaicod {host}:{port}", "short": f"mosaicod :{port} connected"}
         except OSError:
-            return {"status": "down", "detail": f"mosaicod {host}:{port} unreachable - offline fallback"}
+            return {"status": "down", "detail": f"mosaicod {host}:{port} unreachable - offline fallback",
+                    "short": f"mosaicod :{port} down · offline fallback"}
     return _cached("mosaico", 5, probe)

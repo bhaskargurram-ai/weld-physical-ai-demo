@@ -69,7 +69,7 @@ def create_app() -> FastAPI:
 
     app.mount("/static", StaticFiles(directory=config.STATIC_DIR), name="static")
 
-    @app.get("/files/{path:path}", include_in_schema=False)
+    @app.api_route("/files/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     def files(path: str):
         if path.startswith("abs/"):
             p = Path("/" + path[4:]).resolve()
@@ -102,15 +102,16 @@ def create_app() -> FastAPI:
                  "detail": f"{len(passes)} passes" + (" (fixtures)" if config.fixtures_enabled() else ""),
                  "metric": len(passes),
                  "sub": f"{sum(1 for d in gen_dir.iterdir() if d.is_dir()) if gen_dir.exists() else 0} pass dirs"},
-                {"id": "mosaico", "name": "Mosaico", "status": mos["status"], "detail": mos["detail"],
+                {"id": "mosaico", "name": "Mosaico", "status": mos["status"], "detail": mos["short"],
                  "sub": f"source: {data.last_source}"},
                 {"id": "curator", "name": "Curator", "status": "ok" if man else "empty",
                  "detail": f"{sum(1 for r in man if r.get('kept'))}/{len(man)} clips kept" if man else "no manifest yet",
                  "metric": len(man), "sub": "Cosmos Curator"},
                 {"id": "cosmos", "name": "Cosmos 3", "status": "ok" if cos.get("reasoner") and cos.get("generator")
                  else "warn",
-                 "detail": f"{cos.get('mode_label')} · reasoner {'✓' if cos.get('reasoner') else 'fallback'} · "
-                           f"generator {'✓' if cos.get('generator') else 'fallback'}",
+                 "detail": (f"{cos.get('mode_label')} · reasoner + generator ready" if cos.get("reasoner") and cos.get("generator")
+                            else f"{cos.get('mode_label')} · R {'✓' if cos.get('reasoner') else 'fallback'} · "
+                                 f"G {'✓' if cos.get('generator') else 'fallback'}"),
                  "sub": "worldmodels" if cos.get("worldmodels") else "mock (worldmodels not installed)",
                  "raw": {k: v for k, v in cos.items() if k != "raw"}},
                 {"id": "copilot", "name": "Copilot", "status": "ok", "detail": agent.label,

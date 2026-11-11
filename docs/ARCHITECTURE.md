@@ -59,7 +59,7 @@ demo runs on a laptop with no services and no GPU (`COSMOS_BACKEND=replay`).
 | 2 | ingest | `python -m mosaico_io.ingest data/generated` | generated | one Mosaico sequence per pass. Topics `/weld/arc`, `/weld/travel`, `/weld/thermal`, `/robot/joint_states`, `/robot/tcp_pose`, `/camera/torch/image`, `/weld/events` |
 | 3 | export | `python -m mosaico_io.export --out data/export` | Mosaico (or generated) | `<clip_id>.mp4` + `.json` sidecar `{clip_id, sequence_name, t0_s, t1_s, meta, signal_stats, wps_violations, defects_in_window, rt_result}` |
 | 4 | curate | `python -m curate.run --input data/export --out data/curated --backend {lite,curator-next,curator-legacy}` | export | `manifest.jsonl`, `lance/`, `clips/`, `dataset_card.md` |
-| 5 | warm-cache | `python -m worldmodels.warm_cache …` | manifest | `data/cache/worldmodels/<sha256>.json/.mp4` |
+| 5 | warm-cache | `python -m worldmodels.cli warm-cache --manifest data/curated/manifest.jsonl --limit 12 --preset live` | manifest | `data/cache/worldmodels/<sha256>.json/.mp4` |
 | — | copilot | `uvicorn copilot.app:app --port 7860` | all of the above | `data/copilot/` (generated videos, jobs) |
 
 ## 3. Interfaces
@@ -87,7 +87,7 @@ uses `nim` if `NVIDIA_API_KEY` is set, otherwise `replay`. It is resolved per se
 |---|---|---|---|
 | Postgres, mosaicod, MinIO | `infra/docker-compose.yml`, or none (offline) | native (`runpod/start_all.sh infra`) | native |
 | Curation | `lite` (CPU) | Curator Next, run **before** the model servers | Curator Next on GPU0, next to the Reasoner |
-| Reasoner | replay / nim | GPU0, 0.35 of memory | GPU0, 0.45 of memory |
+| Reasoner | replay / nim | GPU0, 0.32 of memory | GPU0, 0.45 of memory |
 | Generator | replay / nim | GPU0, FP8 + layer-wise offload | GPU1, BF16 |
 | Copilot | `make copilot` | `start_all.sh copilot` | same |
 
@@ -102,7 +102,7 @@ FP8 + offload 32 (38) · Reasoner 23. FP8 needs Hopper or Ada.
 ```
 2× H100 80GB                                   1× H100 80GB
 GPU0 ┌──────────────────────────────┐          GPU0 ┌──────────────────────────────┐
-     │ Reasoner vLLM   ~36 GB (0.45)│               │ Reasoner vLLM   ~28 GB (0.35)│
+     │ Reasoner vLLM   ~36 GB (0.45)│               │ Reasoner vLLM   ~26 GB (0.32)│
      │  weights 23 + KV cache       │               │  weights 23 + KV cache       │
      │ Curator captioner (batch)    │               │ Generator FP8+offload ~32-38 │
      │  Qwen3.8-27B-FP8 ~30-40 GB   │               │  (layers streamed from host) │
@@ -114,9 +114,10 @@ GPU1 ┌────────────────────────
      └──────────────────────────────┘
 ```
 
-Overrides: `REASONER_GPU`, `GENERATOR_GPU`, `GENERATOR_PRECISION` (`bf16|fp8`), `GENERATOR_OFFLOAD` (`0|1`),
-`REASONER_GPU_MEM_UTIL`. `start_all.sh` passes these to `worldmodels/serve/*.sh` as `CUDA_VISIBLE_DEVICES`, `PORT`,
-`GPU_MEM_UTIL`, `PRECISION` and `OFFLOAD`. On a shared GPU it waits for the Reasoner to finish loading before it starts the Generator.
+Overrides (names read by `worldmodels/serve/{reasoner,generator}.sh`): `REASONER_GPU`, `REASONER_GPU_UTIL`,
+`GENERATOR_GPU`, `GENERATOR_PRECISION` (`bf16|fp8|fp8-ckpt`) and `OFFLOAD` (`0|1`). `start_all.sh` sets them from the GPU
+count and runs the scripts in the foreground under its own process supervisor. On a shared GPU it waits for the Reasoner
+to finish loading before it starts the Generator.
 
 ## 6. Ports
 
@@ -136,15 +137,15 @@ Overrides: `REASONER_GPU`, `GENERATOR_GPU`, `GENERATOR_PRECISION` (`bf16|fp8`), 
 ```
 /workspace/
 ├── weld-physical-ai-demo/      repo + .venv + data/ (generated, export, curated, cache)
-├── models/                     Cosmos3-Nano[-FP8] (hf download)
+├── .cache/huggingface/         Cosmos3-Nano weights (HF cache shared by bootstrap + vLLM)
 ├── cosmos-curator/             checkout + .pixi env (pixi install --frozen -e default)
 ├── curator_workspace/models/   Curator weights (/config → here)
-├── venvs/                      vLLM / vLLM-Omni (worldmodels/serve/install.sh)
+├── cosmos/                     venv-reasoner (vLLM), venv-omni (vLLM-Omni), optional cosmos-framework
 ├── pgdata/  minio-data/  mosaico-store/
 ├── bin/                        uv, mosaicod, minio, crane
 ├── .weldworld/                 env.sh (paths), demo.env (edit me), secrets.env (generated), aws/, cosmos_curator/
 ├── logs/  run/
-└── .cache/                     uv, pixi, HF, go build caches
+└── .cache/                     uv, pixi, go build caches
 ```
 
 The container disk (apt packages, `/config` symlink, `~/.aws` symlinks) is wiped on restart.

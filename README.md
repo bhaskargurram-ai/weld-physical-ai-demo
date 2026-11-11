@@ -24,12 +24,12 @@ Built on open-source infrastructure: **[Mosaico](https://github.com/mosaico-labs
 
 | You ask the copilot… | What happens under the hood |
 |---|---|
-| *"Which passes broke the WPS this week?"* | Mosaico query over per-pass sequences and their metadata (process, WPS, spool, RT result) |
+| *"Which welds this week broke the WPS?"* | Mosaico query over per-pass sequences and their metadata (process, WPS, spool, RT result) |
 | *"Find passes where travel speed went above 7 mm/s"* | **Query by physics**: Mosaico searches inside the 100 Hz sensor streams, not just file names |
-| *"Why did SP-1043 J07 fail RT?"* | WPS-limit check on the synced signals, then the **Cosmos 3 Reasoner** watches the torch-camera clip with sensor context and returns verdict, defect, root cause and action. The replay jumps to the defect |
-| *"What if travel speed drops 20%?"* | **Cosmos 3 Generator** renders a counterfactual video of the same pass |
-| *"Turn this pass into photoreal footage"* | **Cosmos 3 Transfer**: the simulator's edge/depth control video becomes photoreal weld footage (sim→real) |
-| *"How many curated porosity clips do we have for training?"* | **Cosmos Curator** output: 5-second clips, quality-filtered, captioned, embedded and labelled with sensor stats and RT |
+| *"Why did SP-1043 J07 fill pass fail RT?"* | WPS-limit check on the synced signals, then the **Cosmos 3 Reasoner** watches the torch-camera clip with sensor context and returns verdict, defect, root cause and action. The replay jumps to the defect |
+| *"What if travel speed dropped 20% on that pass?"* | **Cosmos 3 Generator** renders a counterfactual video of the same pass |
+| *"Make photoreal training video from the simulator"* | **Cosmos 3 Transfer**: the simulator's edge/depth control video becomes photoreal weld footage (sim→real) |
+| *"How many curated clips do we have for porosity?"* | **Cosmos Curator** output: 5-second clips, quality-filtered, captioned, embedded and labelled with sensor stats and RT |
 
 ## Architecture
 

@@ -30,7 +30,7 @@ GPU memory plan (from `docs/research/cosmos3.md`):
 | Layout | GPU0 | GPU1 |
 |---|---|---|
 | **2× H100 80GB (recommended)** | Reasoner, about 23 GiB (vLLM capped at 0.45 of memory) + Curator captioning batches (Qwen3.8-27B-FP8) | Generator BF16, about 58 GiB (Transfer about 64 GiB) |
-| **1× H100 80GB (budget)** | Reasoner (0.35 of memory) + Generator FP8 with layer-wise offload (about 32 GiB). Run curation **before** starting the model servers | — |
+| **1× H100 80GB (budget)** | Reasoner (0.32 of memory) + Generator FP8 with layer-wise offload (about 32 GiB). Run curation **before** starting the model servers | — |
 | 2× A100 80GB | Reasoner | Generator **BF16 only**: A100 has no FP8 |
 | no GPU | `COSMOS_BACKEND=replay` (cached) or `nim` (build.nvidia.com) | — |
 
@@ -65,7 +65,7 @@ own CUDA runtimes.
 | Component | Needs | Why |
 |---|---|---|
 | Cosmos Curator (pixi env `default`) | **CUDA 13 → driver ≥ 580** | `pixi.toml` pins `cuda = "13.0.3"` (ref/cosmos-curator); CUDA 13.x minimum driver is 580 ([NVIDIA CUDA compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/)) |
-| Cosmos 3 Reasoner (vLLM) | cu130 wheels (`vllm==0.21.0`) on driver ≥ 580, or **cu128** wheels (`vllm==0.19.1`) on CUDA 12.8 hosts | `worldmodels/serve/install.sh` is called with `CUDA_FLAVOR=cu130/cu128`, chosen automatically |
+| Cosmos 3 Reasoner (vLLM) | cu130 wheels (`vllm==0.21.0`) on driver ≥ 580, or **cu128** wheels (`vllm==0.19.1`) on CUDA 12.8 hosts | `worldmodels/serve/install.sh` is called with `COSMOS_CUDA_TAG=cu130/cu128`, chosen from the driver |
 | Cosmos 3 Generator (vLLM-Omni) | same as above | |
 
 **Recommended image:** `runpod/pytorch:1.2.0-cu1300-torch2130-ubuntu2404` (official RunPod PyTorch, CUDA 13.0, see
@@ -96,9 +96,9 @@ Space budget (measured from Hugging Face repo sizes):
 | Item | Size |
 |---|---|
 | `nvidia/Cosmos3-Nano` (Reasoner, Generator, Transfer: one checkpoint) | 34 GB |
-| `nvidia/Cosmos3-Nano-FP8` (only on 1-GPU pods) | 21 GB |
+| `nvidia/Cosmos3-Nano-FP8` (only with `GENERATOR_PRECISION=fp8-ckpt`; the default `fp8` quantises online) | 21 GB |
 | Curator models: `Qwen/Qwen3.8-27B-FP8` captioner, TransNetV2, Cosmos-Embed1-336p | about 32 GB |
-| Curator pixi env + vLLM venvs + uv/pixi caches | about 60–80 GB |
+| Curator pixi env + vLLM venvs (`/workspace/cosmos`) + uv/pixi caches | about 60–80 GB |
 | optional `nvidia/Cosmos3-Nano-Sim-Transfer` (`WITH_SIM_TRANSFER=1`) | 31 GB |
 | data, logs, Mosaico store, generated videos | 10–30 GB |
 | **Total** | **about 180–250 GB → 300 GB leaves headroom** |
@@ -178,8 +178,8 @@ bash runpod/bootstrap.sh               # idempotent: re-run any time
    (Curator expects weights at `/config/models/<id>`), and runs `model-download` for
    `transnetv2,qwen3_8_27b_fp8,cosmos_embed1_336p`. **Skipped automatically if the driver is below 580.** The demo then
    uses `CURATE_BACKEND=lite`.
-7. **Cosmos 3 weights**: `hf download` to `/workspace/models/` (`Cosmos3-Nano`, plus `Cosmos3-Nano-FP8` on 1-GPU pods).
-8. **Serving stack**: `worldmodels/serve/install.sh` (vLLM + vLLM-Omni venvs in `/workspace/venvs`, cu130 or cu128).
+7. **Cosmos 3 weights**: `hf download nvidia/Cosmos3-Nano` into the shared HF cache `/workspace/.cache/huggingface`. vLLM loads it by repo id.
+8. **Serving stack**: `worldmodels/serve/install.sh` (vLLM + vLLM-Omni venvs in `/workspace/cosmos`, cu130 or cu128 picked from the driver).
 9. Starts the infra and creates the `raw` bucket.
 
 Useful flags: `--skip-curator`, `--skip-models`, `--skip-worldmodels`, `--mosaicod-from=release|image|source`,
@@ -209,8 +209,8 @@ Mosaico (gRPC, TCP)        <RUNPOD_PUBLIC_IP>:<public port mapped to 6726 — Po
 ```
 
 GPU assignment is automatic: two or more GPUs split Reasoner and Generator, and one GPU shares it with FP8 plus offload. Override it with
-`REASONER_GPU`, `GENERATOR_GPU`, `GENERATOR_PRECISION`, `GENERATOR_OFFLOAD` and `REASONER_GPU_MEM_UTIL` (see
-`configs/demo.env.example`). Logs are in `/workspace/logs/<service>.log`. `bash runpod/stop_all.sh models` frees the GPUs,
+`REASONER_GPU`, `REASONER_GPU_UTIL`, `GENERATOR_GPU`, `GENERATOR_PRECISION` (`bf16|fp8|fp8-ckpt`) and `OFFLOAD`
+(see `configs/demo.env.example`). Logs are in `/workspace/logs/<service>.log`. `bash runpod/stop_all.sh models` frees the GPUs,
 for example before a Curator run on a single GPU.
 
 **Configuration** lives in `/workspace/.weldworld/demo.env`, a copy of `configs/demo.env.example` that you edit.

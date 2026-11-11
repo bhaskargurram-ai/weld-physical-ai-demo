@@ -180,8 +180,9 @@ def make_stages(a: argparse.Namespace) -> list[Stage]:
         return ["--input", str(exp), "--out", str(cur), "--backend", a.backend]
 
     def b_warm(a, py, m):
-        return (opt(py, m, cur / "manifest.jsonl", "--manifest")
-                + opt(py, m, a.warm_limit, "--limit", "--max-clips", "-n"))
+        # worldmodels.cli warm-cache: Reasoner on kept clips + showcase what-if / sim2real generations
+        return ["warm-cache", "--manifest", str(cur / "manifest.jsonl"), "--limit", str(a.warm_limit),
+                "--preset", a.warm_preset]
 
     return [
         Stage("collect", "WeldCell simulator -> data/generated", "collect.simulate", b_collect,
@@ -192,9 +193,8 @@ def make_stages(a: argparse.Namespace) -> list[Stage]:
               lambda a: f"{_n_files(exp, '*.mp4')} clips"),
         Stage("curate", "Curate (cut / caption / embed / filter)", "curate.run", b_curate,
               lambda a: _manifest_stats(cur / "manifest.jsonl")),
-        Stage("warm-cache", "Pre-compute Cosmos 3 verdicts & showcase videos", "worldmodels.warm_cache", b_warm,
-              lambda a: f"{_n_files(d / 'cache' / 'worldmodels', '**/*.json')} cached calls",
-              alternatives=("worldmodels.warm", "worldmodels.precompute")),
+        Stage("warm-cache", "Pre-compute Cosmos 3 verdicts & showcase videos", "worldmodels.cli", b_warm,
+              lambda a: f"{_n_files(d / 'cache' / 'worldmodels', '**/*.json')} cached calls"),
     ]
 
 
@@ -258,6 +258,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--replace", action="store_true", help="re-ingest sequences that already exist in Mosaico")
     p.add_argument("--warm-limit", type=int, default=int(os.environ.get("WARM_LIMIT", 12)),
                    help="max clips to pre-assess in warm-cache")
+    p.add_argument("--warm-preset", default=os.environ.get("WARM_PRESET", "live"), choices=["smoke", "live", "showcase"],
+                   help="generation preset for warm-cache showcase videos")
     sel = p.add_mutually_exclusive_group()
     sel.add_argument("--only", choices=STAGES, nargs="+", help="run only these stages")
     sel.add_argument("--from", dest="start", choices=STAGES, help="start at this stage")

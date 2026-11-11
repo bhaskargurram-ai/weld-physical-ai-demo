@@ -35,7 +35,7 @@ It demonstrates the full physical-AI loop on real open-source infrastructure:
 ## Compute (RunPod)
 | Option | GPUs | Use |
 |---|---|---|
-| **Recommended** | 2× H100 80GB | GPU0: Cosmos3-Nano Reasoner (vLLM, ~23 GiB) + Curator captioning batch. GPU1: Cosmos3-Nano Generator (vLLM-Omni, BF16 58 GiB) |
+| **Recommended** | 2× H100 80GB | GPU0: Cosmos3-Nano Reasoner (vLLM, ~23 GiB) + Curator captioning batch. GPU1: Cosmos3-Nano Generator (vLLM-Omni, BF16; measure on pod) |
 | Budget | 1× H100 80GB | Reasoner + Generator FP8 w/ layerwise offload (23 + 32 GiB); curation runs first, then serving |
 | No GPU / rehearsal | — | `COSMOS_BACKEND=replay` (cached outputs) or `nim` (build.nvidia.com hosted) |
 

@@ -17,7 +17,7 @@
 #   --skip-models        do not download Cosmos 3 weights
 #   --skip-worldmodels   do not call worldmodels/serve/install.sh
 #   --mosaicod-from=X    release | image | source   (default: try in that order)
-#   MODELS="nvidia/Cosmos3-Nano ..."    override the HF repos to download
+#   MODELS="nvidia/Cosmos3-Nano ..."    override the HF repos to prefetch into $HF_HOME
 #   WITH_SIM_TRANSFER=1  also download nvidia/Cosmos3-Nano-Sim-Transfer (real-time sim2real, ~31 GB)
 #   WITH_ANOMALYGEN=1    also download nvidia/Cosmos-AnomalyGen-Metal-Nano (defect LoRA)
 #   CURATOR_MODELS=transnetv2,qwen3_8_27b_fp8,cosmos_embed1_336p
@@ -88,6 +88,7 @@ MODELS_DIR=${MODELS_DIR}
 LOG_DIR=${LOG_DIR}
 DATA_DIR=${REPO_DIR}/data
 HF_HOME=${WS}/.cache/huggingface
+COSMOS_HOME=${WS}/cosmos
 HF_HUB_ENABLE_HF_TRANSFER=0
 UV_CACHE_DIR=${WS}/.cache/uv
 UV_PYTHON_INSTALL_DIR=${WS}/.cache/uv-python
@@ -103,7 +104,7 @@ RUSTUP_HOME=${WS}/.rustup
 PIP_CACHE_DIR=${WS}/.cache/pip
 COSMOS_CURATOR_CODE_DIR=${CURATOR_DIR}
 COSMOS_CURATOR_LOCAL_WORKSPACE_PREFIX=${WS}
-MOSAICOD_DB_URL=postgresql://localhost:${PG_PORT}/mosaico
+MOSAICOD_DB_URL=postgresql://127.0.0.1:${PG_PORT}/mosaico
 MOSAICOD_DB_USER=postgres
 MOSAICOD_STORE_ENDPOINT=file://${MOSAICO_STORE_DIR}
 MOSAICOD_STORE_BUCKET=mosaico
@@ -288,9 +289,13 @@ mosaicod_from_source() {
   if ! have cargo; then
     curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.92 --no-modify-path
   fi
-  local src="${WS}/src/mosaico"
-  if [[ -d "${src}/.git" ]]; then git -C "$src" pull --ff-only -q || true
-  else git clone --depth 1 "$MOSAICO_GIT" "$src"; fi
+  local src="${WS}/src/mosaico" ref="${MOSAICO_REF:-}"
+  # Build the latest *release* tag by default: `main` can be ahead of the mosaicolabs SDK on PyPI.
+  if [[ -z "$ref" ]]; then
+    ref="$(git ls-remote --tags --refs "$MOSAICO_GIT" 'v*' | awk -F/ '{print $NF}' | sort -V | tail -1)"
+  fi
+  rm -rf "$src"
+  git clone --depth 1 ${ref:+--branch "$ref"} "$MOSAICO_GIT" "$src"
   # build.rs compiles ../../../proto with protox (pure Rust, no protoc); sqlx uses cached .sqlx queries
   (cd "${src}/mosaicod" && SQLX_OFFLINE=true cargo build --release --bin mosaicod)
   install -m 755 "${src}/mosaicod/target/release/mosaicod" "${BIN_DIR}/mosaicod"
@@ -365,26 +370,22 @@ EOF
 
 # ================================================================== 8. Cosmos 3 weights
 download_models() {
-  hdr "7/9 Cosmos 3 weights -> ${MODELS_DIR}"
+  hdr "7/9 Cosmos 3 weights -> HF cache ${HF_HOME}"
   if [[ $SKIP_MODELS -eq 1 ]]; then warn "skipped (--skip-models)"; return; fi
-  local n; n="$(gpu_count)"
-  local repos
-  if [[ -n "${MODELS:-}" ]]; then
-    read -r -a repos <<<"${MODELS}"
-  else
-    repos=(nvidia/Cosmos3-Nano)                       # ~34 GB: Reasoner + Generator + Transfer (one omnimodal ckpt)
-    [[ "${n:-0}" -le 1 ]] && repos+=(nvidia/Cosmos3-Nano-FP8)   # ~21 GB: single-GPU generator (FP8, Hopper/Ada only)
-  fi
+  # Same cache the serve scripts use (vLLM loads nvidia/Cosmos3-Nano by repo id), so
+  # worldmodels/serve/install.sh's own prefetch becomes a no-op. One omnimodal checkpoint
+  # (~34 GB) serves Reasoner, Generator and Transfer. 1-GPU pods quantise online (fp8).
+  local repos r hf="${VENV_DIR}/bin/hf"
+  if [[ -n "${MODELS:-}" ]]; then read -r -a repos <<<"${MODELS}"; else repos=(nvidia/Cosmos3-Nano); fi
   [[ "${WITH_SIM_TRANSFER:-0}" == 1 ]] && repos+=(nvidia/Cosmos3-Nano-Sim-Transfer)
   [[ "${WITH_ANOMALYGEN:-0}" == 1 ]] && repos+=(nvidia/Cosmos-AnomalyGen-Metal-Nano)
-  local hf="${VENV_DIR}/bin/hf" r
   [[ -x "$hf" ]] || die "hf CLI missing in ${VENV_DIR} (huggingface_hub not installed?)"
   for r in "${repos[@]}"; do
     log "hf download ${r}"
-    # resumable + idempotent: already-complete files are skipped
-    "$hf" download "$r" --local-dir "${MODELS_DIR}/${r#*/}" >/dev/null   # reads HF_TOKEN from env
-    ok "${r} -> ${MODELS_DIR}/${r#*/} ($(du -sh "${MODELS_DIR}/${r#*/}" | cut -f1))"
+    HF_HOME="$HF_HOME" "$hf" download "$r" >/dev/null   # resumable; reads HF_TOKEN from env
+    ok "${r} cached"
   done
+  du -sh "${HF_HOME}/hub" 2>/dev/null | awk '{print "  HF cache: " $1}'
 }
 
 # ================================================================== 9. world-model servers (agent C)
@@ -394,8 +395,8 @@ install_worldmodels() {
   local inst="${REPO_DIR}/worldmodels/serve/install.sh"
   if [[ ! -f "$inst" ]]; then warn "worldmodels/serve/install.sh not found — skipping"; return; fi
   if [[ "$(gpu_count)" -eq 0 ]]; then warn "no GPU — skipping (use COSMOS_BACKEND=replay or nim)"; return; fi
-  CUDA_FLAVOR="$(cuda_flavor)" VENV_ROOT="${WS}/venvs" MODELS_DIR="$MODELS_DIR" \
-    UV="${BIN_DIR}/uv" bash "$inst"
+  COSMOS_CUDA_TAG="$(cuda_flavor)" COSMOS_HOME="${COSMOS_HOME:-${WS}/cosmos}" HF_HOME="$HF_HOME" \
+    INSTALL_ANOMALYGEN="${WITH_ANOMALYGEN:-0}" bash "$inst"
   ok "worldmodels serving stack installed (CUDA_FLAVOR=$(cuda_flavor))"
 }
 

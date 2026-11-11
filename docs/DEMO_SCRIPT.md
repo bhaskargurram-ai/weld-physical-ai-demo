@@ -22,6 +22,9 @@ searchable by physics, and use NVIDIA's Cosmos world models to explain, predict 
 | Data story fixed | Simulator seed 7 (default), so the same joints carry the same defects every time (see the table below) |
 | Second tab | MinIO console (`-9001`) logged in, for the "where does the data live" question |
 
+**Chips.** The six suggestion chips under the chat box (①–⑥, `copilot/app.py` `DEMO_FLOW`) follow this script in order.
+Two prompts are typed by hand ("Type:"). All of them also work with the zero-key scripted router (`COPILOT_LLM=scripted`).
+
 **The data story (fixed seed).** All of it is synthetic. Say so up front.
 
 | Joint / pass | What happened | RT |
@@ -72,12 +75,12 @@ Say:
 > temperature, and a torch camera. Each pass is one **sequence** in Mosaico, an open-source data platform built for
 > robotics and physical AI, and it carries its spool, joint, WPS and RT result as metadata."
 
-**Chat chip / type:** `Which passes broke the WPS this week?`
+**Chip ①:** `Which welds this week broke the WPS?`
 *(With `COPILOT_LLM=claude` you can be more specific: "Show me FCAW fill passes on SP-1043 that broke the WPS".)*
 
 > "That's a query on **metadata**. Here's the one nobody can do today: a query on **physics**."
 
-**Chat chip / type:** `Find passes where travel speed went above 7 mm/s`
+**Type:** `Find passes where travel speed went above 7 mm/s`
 
 **Wow #1: query by physics.** The result lists time windows inside passes, not just files.
 > "Mosaico indexes the sensor values themselves, so 'show me every time gas flow dropped below 8 L/min across all cells this
@@ -88,7 +91,7 @@ Say:
 
 ## 4:00–7:00 · Root cause and the Cosmos verdict against RT (hero joint SP-1043 J07)
 
-**Chat chip / type:** `Why did SP-1043 J07 fail RT?`
+**Chip ②:** `Why did SP-1043 J07 fill pass fail RT?`
 
 The copilot runs `wps_check`, then `assess_weld` (Cosmos 3 Reasoner), then jumps the replay to the defect.
 
@@ -103,7 +106,7 @@ Point at:
 > **before** anyone shot the joint. RT agreed. That's the shift: from 'RT found it a week later' to 'the cell flagged it
 > during the pass, with the cause attached'."
 
-**Chat chip / type:** `Show me the moment porosity started`
+**Chip ③:** `Show me the moment porosity started`
 
 > "And this is your traceability record: the actual parameters, against the WPS, on every pass, for every
 > spool package. Your Section IX paperwork says what *should* happen, and this shows what *did*."
@@ -112,7 +115,7 @@ Point at:
 
 ## 7:00–8:30 · Calibration: it doesn't cry wolf (SP-1044 J03 P3)
 
-**Chat chip / type:** `Assess SP-1044 J03 P3`
+**Type:** `Assess SP-1044 J03 P3`
 
 > "This pass also has porosity, but it's scattered and within acceptance limits. RT accepted it. The model says
 > *accept* or *review*, not reject. We don't want a system that stops the line on every spatter. In the pilot we
@@ -129,7 +132,7 @@ Optional, if they run SAW (needs `COPILOT_LLM=claude` or `cosmos`; the zero-key 
 
 ## 8:30–10:30 · What-if video (Cosmos 3 Generator)
 
-**Chat chip / type:** `What if travel speed drops 20% on that pass?`
+**Chip ④:** `What if travel speed dropped 20% on that pass?`
 
 The copilot starts a background job, shows a progress indicator, then plays the generated clip. Live generation runs at 480p and takes
 about a minute. The showcase clip comes from the warm cache.
@@ -145,13 +148,13 @@ Be honest: "It's a visual prediction, not a metallurgical simulation. It shows t
 
 ## 10:30–12:30 · Sim→Real and the training-data story (Curator + Transfer)
 
-**Chat chip / type:** `Turn this pass into photoreal footage`
+**Chip ⑤:** `Make photoreal training video from the simulator`
 
 **Wow #4: sim→real.** Split view: the simulator's edge or depth render on the left, Cosmos 3 Transfer's photoreal output on the right.
 > "Defects are rare in a good shop, which is exactly why you can't train an AI on your own footage alone. We simulate the cell,
 > inject porosity, lack of fusion and burn-through with the right sensor signatures, and Cosmos makes it look real."
 
-**Chat chip / type:** `How many curated porosity clips do we have for training?`
+**Chip ⑥:** `How many curated clips do we have for porosity?`
 
 > "Every clip went through NVIDIA Cosmos Curator: cut into 5-second clips, quality-filtered, captioned and embedded, and
 > labelled with the sensor stats and the RT result. That's a training-ready dataset, and the same pipeline runs on
