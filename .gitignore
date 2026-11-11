@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+data/raw/
+data/generated/
+data/curated/
+outputs/
+*.mp4
+*.lance/
+.env
+checkpoints/
