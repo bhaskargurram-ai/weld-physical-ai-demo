@@ -160,21 +160,13 @@ init_postgres() {
   hdr "3/9 PostgreSQL"
   local pgbin; pgbin="$(find /usr/lib/postgresql -mindepth 2 -maxdepth 2 -type d -name bin 2>/dev/null | sort -V | tail -1)"
   [[ -n "$pgbin" ]] || die "postgresql binaries not found (apt step skipped?)"
-  local pgdata="${PGDATA:-$PGDATA_DEFAULT}"
+  local pgdata="${WELDWORLD_PGDATA:-$PGDATA_DEFAULT}"   # ignore stale PGDATA from an older pg.env
   if [[ ! -s "${pgdata}/PG_VERSION" ]]; then
     # a brand-new (empty) catalog: drop Mosaico files left by an earlier pod so catalog and store match
     rm -rf "${MOSAICO_STORE_DIR:?}"/* 2>/dev/null || true
-    mkdir -p "$pgdata"
-    chown -R postgres:postgres "$pgdata" 2>/dev/null || true
-    chmod 700 "$pgdata" 2>/dev/null || true
-    if ! su postgres -c "${pgbin}/initdb -D '${pgdata}' -U postgres --auth-local=trust --auth-host=scram-sha-256 -E UTF8" >/dev/null; then
-      # Runpod network volumes refuse the 0700 permissions Postgres insists on. Keep the catalog on the
-      # container disk; the pipeline re-ingests the simulated passes every run (~1-2 min).
-      log "network volume cannot host Postgres (permissions) -> catalog on container disk"
-      pgdata="/var/lib/postgresql/weldworld"
-      mkdir -p "$pgdata"; chown -R postgres:postgres "$pgdata"; chmod 700 "$pgdata"
-      su postgres -c "${pgbin}/initdb -D '${pgdata}' -U postgres --auth-local=trust --auth-host=scram-sha-256 -E UTF8" >/dev/null
-    fi
+    mkdir -p "$pgdata"; chown -R postgres:postgres "$pgdata"; chmod 700 "$pgdata"
+    su postgres -c "${pgbin}/initdb -D '${pgdata}' -U postgres --auth-local=trust --auth-host=scram-sha-256 -E UTF8" >/dev/null \
+      || die "initdb ${pgdata} failed"
     {
       echo "listen_addresses = 'localhost'"
       echo "port = ${PG_PORT}"
@@ -185,8 +177,8 @@ init_postgres() {
   echo "PGDATA=${pgdata}" >"${STATE_DIR}/pg.env"
   echo "PGBIN=${pgbin}" >>"${STATE_DIR}/pg.env"
   if ! su postgres -c "${pgbin}/pg_ctl -D '${pgdata}' status" >/dev/null 2>&1; then
-    touch "${LOG_DIR}/postgres.log"; chown postgres "${LOG_DIR}/postgres.log" 2>/dev/null || true
-    su postgres -c "${pgbin}/pg_ctl -D '${pgdata}' -l '${LOG_DIR}/postgres.log' -w start" >/dev/null
+    pg_log_prepare
+    su postgres -c "${pgbin}/pg_ctl -D '${pgdata}' -l '${PG_LOG}' -w start" >/dev/null || { tail -n 20 "$PG_LOG" >&2; die "postgres did not start"; }
   fi
   # shellcheck disable=SC1091
   . "${STATE_DIR}/secrets.env"

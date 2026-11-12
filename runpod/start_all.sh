@@ -52,8 +52,8 @@ start_postgres() {
   else
     # after a pod restart the re-created `postgres` user may have a different uid than the files on /workspace
     chown -R postgres:postgres "$PGDATA" 2>/dev/null || true
-    touch "${LOG_DIR}/postgres.log"; chown postgres "${LOG_DIR}/postgres.log" 2>/dev/null || true
-    su postgres -c "${PGBIN}/pg_ctl -D '${PGDATA}' -l '${LOG_DIR}/postgres.log' -w -t 60 start" >/dev/null
+    pg_log_prepare
+    su postgres -c "${PGBIN}/pg_ctl -D '${PGDATA}' -l '${PG_LOG}' -w -t 60 start" >/dev/null
     ok "postgres started (${PGDATA})"
   fi
 }

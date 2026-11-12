@@ -13,7 +13,11 @@ BIN_DIR="${WS}/bin"                     # uv, mosaicod, minio, crane, ...
 MODELS_DIR="${MODELS_DIR:-${WS}/models}"
 CURATOR_DIR="${CURATOR_DIR:-${WS}/cosmos-curator}"
 CURATOR_WS="${WS}/curator_workspace"    # symlinked to /config (Curator looks for /config/models/<id>)
-PGDATA_DEFAULT="${WS}/pgdata"
+# Postgres never lives on the network volume: depending on the volume the postgres user either cannot enter
+# /workspace at all or gets refused the 0700 data-dir permissions it insists on. The Mosaico catalog is rebuilt
+# every run (the pipeline re-ingests), so container disk is fine. Its log goes there too, linked into LOG_DIR.
+PGDATA_DEFAULT="/var/lib/postgresql/weldworld"
+PG_LOG="/var/log/postgresql/weldworld.log"
 MINIO_DATA="${WS}/minio-data"
 MOSAICO_STORE_DIR="${WS}/mosaico-store"
 VENV_DIR="${REPO_DIR}/.venv"
@@ -39,6 +43,13 @@ die()  { printf '%s FAIL%s %s\n' "${C_R}" "${C_0}" "$*" >&2; exit 1; }
 hdr()  { printf '\n%s==> %s%s\n' "${C_B}" "$*" "${C_0}"; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Postgres log on the container disk (the postgres user may not be able to write to /workspace); a symlink in
+# LOG_DIR keeps it next to the other logs for root.
+pg_log_prepare() {
+  mkdir -p "$(dirname "$PG_LOG")"; touch "$PG_LOG"; chown postgres:postgres "$(dirname "$PG_LOG")" "$PG_LOG" 2>/dev/null || true
+  ln -sfn "$PG_LOG" "${LOG_DIR}/postgres.log" 2>/dev/null || true
+}
 
 # ------------------------------------------------------------------ env
 # Precedence (first non-empty wins): process env (e.g. RunPod pod env vars HF_TOKEN /
