@@ -226,7 +226,7 @@ def test_chat_ndt_question_and_suggestions(client):
     assert [d["label"] for d in sug["demo"]] == [t for t, _ in REAL_DEMO]
     text = "".join(e.get("delta", "") for e in sse(client.post(
         "/api/chat", json={"message": REAL_DEMO[0][0]}).text) if e.get("type") == "text")
-    assert "2 of 3 inspected passes have NDT indications" in text and "not inspected" in text
+    assert "2 of 4 inspected passes have NDT indications" in text and "not inspected" in text
     assert "SIMULATED" in text   # the simulator pass with RT reject is marked, never passed off as real
 
 
