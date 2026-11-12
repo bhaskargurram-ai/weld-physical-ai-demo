@@ -88,6 +88,10 @@ make test
 Optional keys go in `.env`: `ANTHROPIC_API_KEY` (Claude as the chat agent) and `NVIDIA_API_KEY` (hosted Cosmos 3 on
 build.nvidia.com via `COSMOS_BACKEND=nim`, with no local GPU).
 
+**Windows / no `make`:** `python scripts/run_copilot.py` starts the copilot in replay mode (loads `.env`, opens the
+browser). It runs uvicorn through Python, so it also works where an Application Control policy blocks pip's
+`uvicorn.exe`. Use `--fixtures` for built-in mock data, or `python runpod/download.py demo` first for the GPU run's data.
+
 ## Quickstart B: one command on Runpod (from your laptop)
 
 ```bash
