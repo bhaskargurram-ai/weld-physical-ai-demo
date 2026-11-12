@@ -70,6 +70,17 @@ JOINT_ID = "V30"
 CELL_ID = "BAM tandem-GMAW cell (2x Fronius TPS/i, robot)"
 EXTRA_FILES = ("experiment_list.csv", "data_view_example.ipynb")
 
+# What the camera shows (checked by eye on WID617 L1/L3/L6 and WID630 L2 stills) - for UI captions
+VIDEO_CAPTION = ("Real process camera (BAM, HDR grayscale, ~18 fps) moving with the torch: the dark gas-nozzle "
+                 "silhouette, the wire tip(s) and arc glow at the weld pool, spatter and fume. BAM overlay kept: "
+                 "camera ID, local date/time, camera clock, frame counter, ruler, (c) BAM.")
+CAMERA_VIEWS = {
+    617: "camera behind/above the tandem torch looking along the groove: nozzle silhouette in front, both arcs "
+         "(two bright wire tips) and the pool just beyond it, the groove flank and plate surface lit by the arc",
+    630: "different camera (side view): nozzle on the right, the wire sticking out horizontally into the bright "
+         "arc/pool region on the left, groove wall lit by the arc",
+}
+
 ARC_HZ = 100
 ARC_ON_A = 30.0          # 10 ms mean lead current above this = arc burning
 OUTAGE_MIN_S = 0.02      # report arc outages >= 20 ms (two 10 ms bins)
@@ -1051,6 +1062,7 @@ def convert_layer(raw_dir: Path, out_dir: Path, wid: int, layer: int, exp: Optio
                              "control": {"edge": "control/edge.mp4"},
                              "stills": [f"stills/{s['file']}" for s in vw["stills"]],
                              "repeated_frames": vw["repeated_frames"], "sync": sync,
+                             "caption": VIDEO_CAPTION, "view": CAMERA_VIEWS.get(wid),
                              "attribution": ATTRIBUTION}
             meta["stills"] = meta["video"]["stills"]
         except Exception as e:   # video is optional: keep the signals
@@ -1149,6 +1161,18 @@ def write_report(metas: list[dict], path: Path) -> Path:
             me["travel_speed_mmps"] and round(me["travel_speed_mmps"], 2), no["wts_mmps"],
             me["heat_input_kj_mm"] and round(me["heat_input_kj_mm"], 2),
             m.get("interpass_start_c"), m.get("interpass_max_c"), vs))
+    L += ["", "## What the camera shows (for UI captions)", "", f"- {VIDEO_CAPTION}"]
+    L += [f"- WID{w}: {v}" for w, v in CAMERA_VIEWS.items()]
+    L += ["- Video sync: the process.nc `video_frame` channel is a 40 Hz pulse train, NOT one pulse per saved frame "
+          "(e.g. WID617_L3: 1516 pulses vs 701 frame slots), so frames are aligned optically: the first frame showing "
+          "the arc = electrical arc start, cross-checked with the first frame without arc vs the electrical arc stop "
+          "(agreement within ±1.2 frames on all layers). WID630 videos start with one stale frame from the previous "
+          "recording and have 12-14 dropped frame slots (repeated in the CFR output).",
+          "- Gas: every pass shows the flow meters reaching 80 % of GASVALUE only ~1.1 s (lead) / ~1.3 s (trail) after "
+          "ignition (gas pre-flow is set to 0.1 s) - a start-up transient, logged as gas_startup_lag, not a defect.",
+          "- thermo_1 is a fixed workpiece thermocouple, so interpass_c is a true interpass value only at arc start; "
+          "it peaks when the torch passes the sensor (up to ~890 °C on the WID617 cap).",
+          "- No NDT was published: rt_result = not_inspected and no defect labels exist for these welds."]
     L += ["", "## Per pass: deviations and anomalies", ""]
     for m in metas:
         me, no = m["measured"], m["nominal"]

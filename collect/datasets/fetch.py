@@ -39,6 +39,8 @@ def source_opts(src: str, args) -> dict:
     if src == "aimen_saw":
         return {"coupons": _split(args.limit_coupons)}
     if src == "bam_tgmaw":
+        if str(args.bam_wids or "").strip().lower() == "all":
+            return {"wids": "all"}            # bam_tgmaw.parse_wids: "all" = all five; None = default 617,630
         wids = _split(args.bam_wids)
         if wids is not None:
             wids = [w.upper().replace("WID", "") for w in wids]
