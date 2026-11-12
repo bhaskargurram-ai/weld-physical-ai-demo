@@ -327,6 +327,43 @@ def _pname(p: str) -> str:
     return f"{i['label']} ({i['unit']})" if i else p
 
 
+def fit_to_sdk(fn: Any, kw: dict) -> dict:
+    """Keep the request identical on the wire when the installed `anthropic` SDK predates a parameter.
+
+    Request fields the SDK method does not declare (e.g. `fallbacks` on older releases) move into
+    `extra_body`; `betas` becomes the `anthropic-beta` header. Newer SDKs get the kwargs unchanged.
+    """
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return kw
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return kw
+    kw = dict(kw)
+    if "betas" in kw and "betas" not in params:
+        betas = kw.pop("betas")
+        headers = dict(kw.get("extra_headers") or {})
+        headers["anthropic-beta"] = ",".join([*filter(None, [headers.get("anthropic-beta")]), *betas])
+        kw["extra_headers"] = headers
+    unknown = [k for k in kw if k not in params and k not in ("extra_headers", "extra_body")]
+    if unknown:
+        extra = dict(kw.get("extra_body") or {})
+        for k in unknown:
+            extra[k] = kw.pop(k)
+        kw["extra_body"] = extra
+        log.info("anthropic SDK %s lacks %s; sending them in extra_body", _sdk_version(), ", ".join(unknown))
+    return kw
+
+
+def _sdk_version() -> str:
+    try:
+        import anthropic
+        return anthropic.__version__
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
 def _extract_ref(text: str) -> str | None:
     m = re.search(r"(?:SP|V)[-_ ]?\d{3,5}(?:[_ ]+(?:J|CS)\d{1,3})?(?:[_ ]+P\d)?(?:[_ ]+(?:GTAW|FCAW|SMAW|GMAW|SAW))?", text, re.I)
     if not m:
@@ -378,6 +415,9 @@ class ClaudeAgent(BaseAgent):
             kw["fallbacks"] = "default"
         return kw
 
+    def stream_kwargs(self, messages: list) -> dict:
+        return fit_to_sdk(self.client.beta.messages.stream, self.request_kwargs(messages))
+
     async def run(self, session: Session, text: str) -> AsyncIterator[dict]:
         import anthropic
         msgs = session.claude_messages
@@ -387,7 +427,7 @@ class ClaudeAgent(BaseAgent):
             json_retries = 0
             for _turn in range(self.max_turns):
                 try:
-                    async with self.client.beta.messages.stream(**self.request_kwargs(msgs)) as stream:
+                    async with self.client.beta.messages.stream(**self.stream_kwargs(msgs)) as stream:
                         async for event in stream:
                             et = getattr(event, "type", None)
                             if et == "text":

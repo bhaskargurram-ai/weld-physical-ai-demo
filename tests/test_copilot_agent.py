@@ -226,3 +226,27 @@ def test_cosmos_react_protocol(toolbox, monkeypatch):
 def test_first_json():
     assert _first_json('Sure: {"tool": "x", "args": {"a": {"b": 1}}} done') == {"tool": "x", "args": {"a": {"b": 1}}}
     assert _first_json("no json here") is None
+
+
+def test_fit_to_sdk_moves_unknown_params_for_older_anthropic_sdks():
+    from copilot.agent import fit_to_sdk
+
+    def old_stream(*, model, max_tokens, messages, system=None, tools=None, thinking=None,
+                   output_config=None, extra_headers=None, extra_query=None, extra_body=None, timeout=None):
+        """An SDK release from before server-side fallbacks / the betas kwarg."""
+
+    kw = {"model": "claude-opus-5-5", "max_tokens": 16000, "messages": [], "thinking": {"type": "adaptive"},
+          "betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
+    out = fit_to_sdk(old_stream, kw)
+    assert "fallbacks" not in out and out["extra_body"] == {"fallbacks": "default"}
+    assert out["extra_headers"] == {"anthropic-beta": "server-side-fallback-2026-07-01"}
+    assert out["thinking"] == {"type": "adaptive"} and kw["fallbacks"] == "default"   # input untouched
+
+
+def test_fit_to_sdk_leaves_current_sdk_untouched():
+    import anthropic
+    from copilot.agent import fit_to_sdk
+    client = anthropic.AsyncAnthropic(api_key="x")
+    kw = {"model": "claude-opus-5-5", "max_tokens": 10, "messages": [],
+          "betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
+    assert fit_to_sdk(client.beta.messages.stream, kw) == kw
