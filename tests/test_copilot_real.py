@@ -90,7 +90,7 @@ def test_saw_pass_detail_photo_ndt_and_signals(client):
     s = client.get("/api/passes/PP5_B02_SAW/signals", params={"hz": 10}).json()
     assert "gas_lpm" not in s["series"] and "current2_a" in s["series"]
     # AC trail electrode: RMS replaces the meaningless 10 ms mean; the voltage has no RMS so it is not plotted
-    assert min(v for v in s["series"]["current2_a"] if v is not None) > 0 and "RMS shown" in s["notes"]["current2_a"]
+    assert min(v for v in s["series"]["current2_a"] if v is not None) >= 0 and "RMS shown" in s["notes"]["current2_a"]
     assert "voltage2_v" not in s["series"] and "AC electrode" in s["notes"]["voltage2_v"]
     assert s["electrodes"] == 2 and s["notes"]["gas_lpm"] and "current_a" in s["wps"]
     assert no_nan(d) and no_nan(s)

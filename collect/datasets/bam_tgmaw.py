@@ -1114,8 +1114,10 @@ def _pct(a, b):
 def write_report(metas: list[dict], path: Path) -> Path:
     L = [f"# BAM tandem-GMAW — conversion report", "",
          f"Source: {AUTHORS}, *{TITLE}*, Zenodo DOI {DOI} ({LICENSE}). Measured = steady part of the arc "
-         "(first/last 2 s excluded). Command = experiment_list (wfs, wts) / Fronius synergic recommended values "
-         "(I, U) / GASVALUE (gas). Current & voltage from BAM's 10 kHz DAQ (process.nc).", "",
+         "(first/last 2 s excluded). Commands = experiment_list (wfs, wts) and GASVALUE (gas); (rec) = the Fronius "
+         "synergic *recommended* display value for the job, not a command. Current & voltage from BAM's 10 kHz DAQ "
+         "(process.nc). WPS current/voltage ranges = measured mean ±10 % (PQR-style), so they are not checked "
+         "against (rec).", "",
          "| pass | mode | arc s | lead I A (rec) | lead U V (rec) | trail I A (rec) | trail U V (rec) | "
          "wfs lead/trail m/min (cmd) | gas lead/trail L/min (cmd) | travel mm/s (wts) | HI kJ/mm | interpass °C | video sync |",
          "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
