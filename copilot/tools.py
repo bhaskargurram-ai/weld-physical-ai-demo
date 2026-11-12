@@ -333,7 +333,7 @@ class Toolbox:
             params = (flagged + [p for p in ("current_a", "current2_a", "voltage_v", "travel_speed_mmps", "gas_lpm")
                                  if p not in flagged and p in stats])[:4]
         res = {"sequence": seq, "t0": round(a, 2), "t1": round(b, 2), "stats": stats,
-               "stats_window": "steady arc (first 1 s after arc start and last 0.6 s excluded)",
+               "stats_window": "steady arc (arc-start and arc-stop transients excluded)",
                "missing_signals": self.data.signal_notes(seq)}
         if "current2_a" in stats:
             res["lead_vs_trail"] = {p: {"lead": stats[p]["mean"], "trail": stats[TRAIL_OF[p]]["mean"],

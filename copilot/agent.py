@@ -382,7 +382,7 @@ class ScriptedAgent(BaseAgent):
                 parts.append(r["error"])
             else:
                 parts.append(f"The bead photo of **{r['sequence']}** is in the replay panel ({r.get('caption')}) — "
-                             "scroll to zoom, drag to pan, thumbnails below.")
+                             "scroll to zoom, drag to pan, thumbnails below.\n")
                 if r.get("ndt_indications"):
                     parts.append(f"NDT found **{r['ndt_indications']} indication(s)** in this bead; RT/UT indications are "
                                  "internal, so they are usually not visible on the bead surface.")
@@ -417,12 +417,12 @@ class ScriptedAgent(BaseAgent):
             what = {"photo": "the bead photo", "signals": "the signals"}.get(a.get("input_kind"), "clip")
             span = f" {a.get('t0_s')}–{a.get('t1_s')}s" if what == "clip" else ""
             parts.append(f"\n**{who}:** {(a.get('verdict') or '').upper()}"
-                         f"{' — ' + ds if ds else ''} on {what}{span}.")
+                         f"{' — ' + ds if ds else ''} on {what}{span}.\n")
             if a.get("ndt_indications"):
-                parts.append("**NDT ground truth:** " + ", ".join(f"{k.replace('_', ' ')} ×{v}"
-                                                                 for k, v in a["ndt_indications"].items()))
-            parts.append(f"**{'Cause' if a.get('ndt_indications') is not None else 'Root cause'}:** {a.get('root_cause')}")
-            parts.append(f"**Action:** {a.get('recommended_action')}")
+                parts.append("- **NDT ground truth:** " + ", ".join(f"{k.replace('_', ' ')} ×{v}"
+                                                                   for k, v in a["ndt_indications"].items()))
+            parts.append(f"- **{'Cause' if a.get('ndt_indications') is not None else 'Root cause'}:** {a.get('root_cause')}")
+            parts.append(f"- **Action:** {a.get('recommended_action')}")
         if "show_weld" in by and "assess_weld" not in by:
             r = by["show_weld"]
             if "ndt_summary" in by:
@@ -467,7 +467,7 @@ class ScriptedAgent(BaseAgent):
                 "params" in a for n, a, _ in results if n == "get_signals_summary"):
             r = by["get_signals_summary"]
             parts.append(f"**Lead vs trail electrode — {r['sequence']}** (means over the steady arc, "
-                         f"{r['t0']:.0f}–{r['t1']:.0f} s minus start/stop transients):")
+                         f"{r['t0']:.0f}–{r['t1']:.0f} s, arc-start/stop transients excluded):")
             parts.append("| | Lead | Trail | Δ trail |\n|---|---:|---:|---:|")
             for p, v in r["lead_vs_trail"].items():
                 d = (v["trail"] - v["lead"]) / v["lead"] * 100 if v["lead"] else 0

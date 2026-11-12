@@ -586,6 +586,12 @@ def convert_bead(h5_path: Path, coupon: str, bead: int, n_beads: int, xls: dict,
     for k in ("pyrometer_L", "pyrometer_R", "pyrometer_back"):
         cols0[k] = d0[k].astype(np.float64)
     g0 = C.grid_mean(rel0, cols0, duration, fill="interp")
+    # wire-speed channel sometimes not recorded (reads 0 for the whole bead) -> NaN, not a fake "0 m/min"
+    wfs_recorded = {}
+    for k in [c for c in ("wfs_mpm", "wfs2_mpm") if c in g0]:
+        wfs_recorded[k] = bool(np.nanmean(g0[k].to_numpy()) > 0.05)
+        if not wfs_recorded[k]:
+            g0[k] = np.nan
 
     arc = pd.DataFrame({"t_s": g1["t_s"], "current_a": g1["current_a"], "voltage_v": g1["voltage_v"],
                         "wfs_mpm": g0["wfs_mpm"], "gas_lpm": np.nan})
@@ -728,6 +734,9 @@ def convert_bead(h5_path: Path, coupon: str, bead: int, n_beads: int, xls: dict,
         "travel_speed": f"|d(x)/dt| of robot x (data0), {TRAVEL_SMOOTH_S} s centred moving average",
         "heat_input_basis": hi_basis,
         "robot_position_recorded": robot_ok,
+        "wire_speed_recorded": wfs_recorded,
+        "wire_speed_sensor": "LabJack counter channel; reads systematically below the published setting "
+                             "(typically −7…−35 %), treat absolute wfs with caution",
         "heat_input": "HI [kJ/mm] = (V_a·I_a + V_b·I_b) / v_travel[mm/s] / 1000, η = 1 (arc energy); "
                       "powers = 10 ms means of instantaneous V·I; NaN where v_travel < 0.5 mm/s",
         "interpass_c": "max(pyrometer_L, pyrometer_R); pyrometer_back reads the pool/flux region (temp_back_c)",
@@ -980,7 +989,9 @@ def analyze(out_dir: Path, seqs: Optional[list[str]] = None, report_path: Option
              f"`z` = (window value − mean of up to {N_NULL} random same-length clean windows of the same bead) / "
              "their std, for the window mean (`z_mean`) and the window std (`z_std`, i.e. fluctuation). "
              "With no signature, |z| > 2 happens in ≈5 % of windows by chance and the median z is ≈0. "
-             "Indications without a clean reference (covering ~the whole bead) are listed separately.",
+             "Indications without a clean reference (covering ~the whole bead) are listed separately. "
+             "Caveat: plate temperatures are slow, strongly autocorrelated drifts, so their per-window z values are "
+             "inflated (high |z|>2 rates with a median z near 0 mean 'drift', not a defect-linked shift).",
              ""]
     verdicts = []
     for typ in sorted(per_type):
@@ -1017,7 +1028,11 @@ def analyze(out_dir: Path, seqs: Optional[list[str]] = None, report_path: Option
             if zs.size >= 5 and abs(mzs) >= 1.0 and fs >= 0.25:
                 flagged.append(f"{lbl} fluctuation (median z {mzs:+.1f}, {fs:.0%} beyond 2σ)")
         lines.append("")
-        if flagged:
+        if T["n"] < 5:
+            v = (f"**{typ}: inconclusive** — only {T['n']} testable window(s) in {len(T['beads'])} bead(s), "
+                 "mostly long ones spanning a large part of the bead, so the clean reference is tiny and the "
+                 "z values are unstable. Descriptive only; no signature can be claimed.")
+        elif flagged:
             v = (f"**{typ}: candidate signature** in {'; '.join(flagged)}. Treat as a hypothesis "
                  f"({T['n']} windows, {len(T['beads'])} beads; not a validated detector).")
         else:
@@ -1025,6 +1040,31 @@ def analyze(out_dir: Path, seqs: Optional[list[str]] = None, report_path: Option
                  f"{T['n']} indication windows are within the bead's own clean-window variation.")
         verdicts.append(v)
         lines += [v, ""]
+    # bead-level view: does a bead with indications deviate more from its published setting?
+    rowsb = []
+    for P in passes:
+        m = P["meta"]
+        nc = m.get("nominal_check", {})
+        rowsb.append({"types": set(m["defect_types"].split(",")) - {"none"}, "I": nc.get("current_dev_pct"),
+                      "U": nc.get("voltage_dev_pct"), "v": nc.get("travel_dev_pct"),
+                      "w": nc.get("wfs_dev_pct"), "Tip": m.get("interpass_start_c")})
+    if rowsb:
+        lines += ["## Bead level: deviation from the published setting", "",
+                  "Mean measured-vs-nominal deviation (%) of whole beads; `Tip` = plate temperature at arc start "
+                  "(°C).", "", "| beads | n | current | voltage | wire speed | travel | Tip |",
+                  "|---|---|---|---|---|---|---|"]
+
+        def agg(sel, name):
+            def mu(k):
+                v = [r[k] for r in sel if r[k] is not None]
+                return f"{np.mean(v):+.1f}" if v and k != "Tip" else (f"{np.mean(v):.0f}" if v else "–")
+            lines.append(f"| {name} | {len(sel)} | {mu('I')} | {mu('U')} | {mu('w')} | {mu('v')} | {mu('Tip')} |")
+
+        agg([r for r in rowsb if not r["types"]], "no indications")
+        for typ in sorted(set().union(*[r["types"] for r in rowsb])):
+            agg([r for r in rowsb if typ in r["types"]], f"with {typ}")
+        lines += ["", "Bead-level differences mix welding settings (root/fill/cap) and coupons; read them as "
+                  "context, not as a detector.", ""]
     lines += ["## Bottom line", ""] + [f"- {v}" for v in verdicts] + [
         "- These are radiographic/ultrasonic indications located by x position along the weld; the "
         "x→time mapping relies on the dataset's sample indices and on constant-speed travel, so windows may be "

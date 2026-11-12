@@ -278,96 +278,104 @@ def export_clips(out_dir, sequences: Optional[list[str]] = None, clip_s: float =
     if sequences is None:
         sequences = select_sequences(data_source)
     results = []
+    failed: list[str] = []
     for seq in sequences:
-        meta = get_meta(seq)
-        df_all = get_signals(seq)
-        viol = violations_from_signals(df_all, meta)
-        local = generated_dir() / seq
-        vinfo = _video_info(meta, local)
-        vfile = local / vinfo["file"]
-        has_local_video = vfile.exists()
-        topics = {t.get("topic") for t in meta.get("topics") or [] if isinstance(t, dict)}
-        has_video = has_local_video or (not is_offline() and (TOPIC_CAMERA in topics or (
-            not topics and source_info(meta)["synthetic"])))
-        if has_local_video and not vinfo["fps"]:
-            vinfo["fps"] = _probe_fps(vfile)
-        photos = _export_photos(seq, meta, local, out)
-        media = "video" if has_video else ("image" if photos else "none")
-        wins = choose_windows(meta, clip_s, media=media)
-        src_info = source_info(meta)
-        inds = ndt_indications(meta)
-        ndt = meta.get("ndt") if isinstance(meta.get("ndt"), dict) else {}
-        jobs = {"rgb": [], "edge": [], "depth": []}
-        sidecars = []
-        for w in wins:
-            t0, t1 = w["t0_s"], round(w["t0_s"] + clip_s, 2)
-            cid = clip_id_for(seq, t0)
-            df = df_all[(df_all["t_s"] >= t0) & (df_all["t_s"] < t1)]
-            dwin = []
-            for d in meta.get("defects", []):
-                if not (d["t_start"] < t1 and d["t_end"] > t0):
-                    continue
-                e = {"defect": d["defect"], "severity": d.get("severity"), "t_start_s": d["t_start"],
-                     "t_end_s": d["t_end"],
-                     "overlap_s": round(max(0.0, min(t1, d["t_end"]) - max(t0, d["t_start"])), 2)}
-                ind = next((i for i in inds if abs(float(i.get("t_start", -1e9)) - float(d["t_start"])) < 1e-3
-                            and (i.get("type") or i.get("defect")) == d["defect"]), None)
-                if ind:
-                    e.update({k: ind[k] for k in ("x_start_mm", "x_end_mm") if k in ind})
-                    e["source"] = "NDT"
-                dwin.append(e)
-            vwin = [v for v in viol if v["t_start_s"] < t1 and v["t_end_s"] > t0]
-            sc = {"clip_id": cid, "sequence_name": seq, "t0_s": t0, "t1_s": t1,
-                  "meta": {**meta_row(meta), "wps": meta.get("wps", {})},
-                  "signal_stats": _stats(df), "wps_violations": vwin, "defects_in_window": dwin,
-                  "rt_result": meta.get("rt_result"), "joint_rt_result": meta.get("joint_rt_result"),
-                  "label": "defect" if dwin else "clean", "window_kind": w["kind"],
-                  "media_type": media, "video": f"{cid}.mp4" if has_video else None,
-                  "fps": vinfo["fps"] if has_video else None,
-                  "video_kind": vinfo["kind"] if has_video else None,
-                  "photos": photos, "photo_note": _photo_note(meta, dwin) if photos else None,
-                  "electrodes": int(meta.get("electrodes") or 1),
-                  "ndt": {"methods": ndt.get("methods") or [], "inspected": bool(ndt.get("inspected", bool(ndt))),
-                          "report_files": ndt.get("report_files") or [],
-                          "indications_in_window": [d for d in dwin if d.get("source") == "NDT"]},
-                  "source": src_info,
-                  "read_from": "local" if is_offline() else "mosaico"}
+        try:
+            meta = get_meta(seq)
+            df_all = get_signals(seq)
+            viol = violations_from_signals(df_all, meta)
+            local = generated_dir() / seq
+            vinfo = _video_info(meta, local)
+            vfile = local / vinfo["file"]
+            has_local_video = vfile.exists()
+            topics = {t.get("topic") for t in meta.get("topics") or [] if isinstance(t, dict)}
+            has_video = has_local_video or (not is_offline() and (TOPIC_CAMERA in topics or (
+                not topics and source_info(meta)["synthetic"])))
+            if has_local_video and not vinfo["fps"]:
+                vinfo["fps"] = _probe_fps(vfile)
+            photos = _export_photos(seq, meta, local, out)
+            media = "video" if has_video else ("image" if photos else "none")
+            wins = choose_windows(meta, clip_s, media=media)
+            src_info = source_info(meta)
+            inds = ndt_indications(meta)
+            ndt = meta.get("ndt") if isinstance(meta.get("ndt"), dict) else {}
+            jobs = {"rgb": [], "edge": [], "depth": []}
+            sidecars = []
+            for w in wins:
+                t0, t1 = w["t0_s"], round(w["t0_s"] + clip_s, 2)
+                cid = clip_id_for(seq, t0)
+                df = df_all[(df_all["t_s"] >= t0) & (df_all["t_s"] < t1)]
+                dwin = []
+                for d in meta.get("defects", []):
+                    if not (d["t_start"] < t1 and d["t_end"] > t0):
+                        continue
+                    e = {"defect": d["defect"], "severity": d.get("severity"), "t_start_s": d["t_start"],
+                         "t_end_s": d["t_end"],
+                         "overlap_s": round(max(0.0, min(t1, d["t_end"]) - max(t0, d["t_start"])), 2)}
+                    ind = next((i for i in inds if abs(float(i.get("t_start", -1e9)) - float(d["t_start"])) < 1e-3
+                                and (i.get("type") or i.get("defect")) == d["defect"]), None)
+                    if ind:
+                        e.update({k: ind[k] for k in ("x_start_mm", "x_end_mm") if k in ind})
+                        e["source"] = "NDT"
+                    dwin.append(e)
+                vwin = [v for v in viol if v["t_start_s"] < t1 and v["t_end_s"] > t0]
+                sc = {"clip_id": cid, "sequence_name": seq, "t0_s": t0, "t1_s": t1,
+                      "meta": {**meta_row(meta), "wps": meta.get("wps", {})},
+                      "signal_stats": _stats(df), "wps_violations": vwin, "defects_in_window": dwin,
+                      "rt_result": meta.get("rt_result"), "joint_rt_result": meta.get("joint_rt_result"),
+                      "label": "defect" if dwin else "clean", "window_kind": w["kind"],
+                      "media_type": media, "video": f"{cid}.mp4" if has_video else None,
+                      "fps": vinfo["fps"] if has_video else None,
+                      "video_kind": vinfo["kind"] if has_video else None,
+                      "photos": photos, "photo_note": _photo_note(meta, dwin) if photos else None,
+                      "electrodes": int(meta.get("electrodes") or 1),
+                      "ndt": {"methods": ndt.get("methods") or [], "inspected": bool(ndt.get("inspected", bool(ndt))),
+                              "report_files": ndt.get("report_files") or [],
+                              "indications_in_window": [d for d in dwin if d.get("source") == "NDT"]},
+                      "source": src_info,
+                      "read_from": "local" if is_offline() else "mosaico"}
+                if include_control and has_video:
+                    sc["control"] = {"edge": f"control/{cid}_edge.mp4", "depth": f"control/{cid}_depth.mp4"}
+                jobs["rgb"].append((t0, t1, out / f"{cid}.mp4"))
+                jobs["edge"].append((t0, t1, out / "control" / f"{cid}_edge.mp4"))
+                jobs["depth"].append((t0, t1, out / "control" / f"{cid}_depth.mp4"))
+                sidecars.append(sc)
+            # video
+            src = None
+            if has_local_video:
+                _cut_local(vfile, jobs["rgb"], vinfo["fps"], vinfo["t_offset_s"])
+                src = vinfo["file"]
+            elif has_video:
+                for t0, t1, p in jobs["rgb"]:
+                    _cut_mosaico(seq, int(meta["t0_ns"]), t0, t1, p)
+                src = f"mosaico:{TOPIC_CAMERA}"
             if include_control and has_video:
-                sc["control"] = {"edge": f"control/{cid}_edge.mp4", "depth": f"control/{cid}_depth.mp4"}
-            jobs["rgb"].append((t0, t1, out / f"{cid}.mp4"))
-            jobs["edge"].append((t0, t1, out / "control" / f"{cid}_edge.mp4"))
-            jobs["depth"].append((t0, t1, out / "control" / f"{cid}_depth.mp4"))
-            sidecars.append(sc)
-        # video
-        src = None
-        if has_local_video:
-            _cut_local(vfile, jobs["rgb"], vinfo["fps"], vinfo["t_offset_s"])
-            src = vinfo["file"]
-        elif has_video:
-            for t0, t1, p in jobs["rgb"]:
-                _cut_mosaico(seq, int(meta["t0_ns"]), t0, t1, p)
-            src = f"mosaico:{TOPIC_CAMERA}"
-        if include_control and has_video:
-            for kind in ("edge", "depth"):
-                f = local / "control" / f"{kind}.mp4"
-                if f.exists():
-                    _cut_local(f, jobs[kind], vinfo["fps"], vinfo["t_offset_s"])
-                for s in sidecars:
-                    if not (out / s["control"].get(kind, "")).is_file():
-                        s["control"].pop(kind, None)
-        for s in sidecars:
-            s["video_source"] = src
-            if src is None or not s["video"] or not (out / s["video"]).exists():
-                s["video"] = None
-                if s["media_type"] == "video":
-                    s["media_type"] = "image" if s["photos"] else "none"
-            with open(out / f"{s['clip_id']}.json", "w") as f:
-                json.dump(clean_json(s), f, indent=2, default=json_default)
-            results.append(s)
-            if not quiet:
-                print(f"  {s['clip_id']:<28} {s['media_type']:<5} {s['label']:<6} "
-                      f"{','.join(d['defect'] for d in s['defects_in_window']) or '-':<16}"
-                      f" viol={len(s['wps_violations'])} RT={s['rt_result']}", flush=True)
+                for kind in ("edge", "depth"):
+                    f = local / "control" / f"{kind}.mp4"
+                    if f.exists():
+                        _cut_local(f, jobs[kind], vinfo["fps"], vinfo["t_offset_s"])
+                    for s in sidecars:
+                        if not (out / s["control"].get(kind, "")).is_file():
+                            s["control"].pop(kind, None)
+            for s in sidecars:
+                s["video_source"] = src
+                if src is None or not s["video"] or not (out / s["video"]).exists():
+                    s["video"] = None
+                    if s["media_type"] == "video":
+                        s["media_type"] = "image" if s["photos"] else "none"
+                with open(out / f"{s['clip_id']}.json", "w") as f:
+                    json.dump(clean_json(s), f, indent=2, default=json_default)
+                results.append(s)
+                if not quiet:
+                    print(f"  {s['clip_id']:<28} {s['media_type']:<5} {s['label']:<6} "
+                          f"{','.join(d['defect'] for d in s['defects_in_window']) or '-':<16}"
+                          f" viol={len(s['wps_violations'])} RT={s['rt_result']}", flush=True)
+        except Exception as e:  # noqa: BLE001 - one unreadable pass (e.g. a video still being written) must not stop the rest
+            failed.append(seq)
+            print(f"  ! {seq}: skipped ({type(e).__name__}: {str(e)[:200]})", file=sys.stderr, flush=True)
+    if failed:
+        print(f"  ! {len(failed)} pass(es) not exported: {', '.join(failed)}", file=sys.stderr, flush=True)
+
     with open(out / "clips.jsonl", "w") as f:
         for s in results:
             f.write(json.dumps({k: s.get(k) for k in ("clip_id", "sequence_name", "t0_s", "t1_s", "label",

@@ -465,14 +465,20 @@ class DataLayer:
             df = df[df["t_s"] <= t1_s]
         return df
 
+    def _transients(self, seq: str) -> tuple[float, float]:
+        """Seconds to skip after arc start / before arc stop. Simulator: 1 s / 0.6 s. Real passes: 3 s / 1.5 s -
+        the recorded SAW and tandem-GMAW arc-start ramps and crater fills last that long."""
+        return (1.0, 0.6) if source_of(self.get_meta(seq)).get("synthetic") else (3.0, 1.5)
+
     def steady_mask(self, seq: str, df: pd.DataFrame) -> np.ndarray:
-        """Arc-on samples without the start transient (1 s) and the arc-stop crater fill (0.6 s)."""
+        """Arc-on samples without the arc-start transient and the arc-stop crater fill (see _transients)."""
         ev = self.events(seq)
         t = df["t_s"].values
         starts = [e["t_s"] for e in ev if e.get("type") == "arc_start"]
         stops = [e["t_s"] for e in ev if e.get("type") == "arc_stop"]
-        a = (min(starts) if starts else (t[0] if len(t) else 0)) + 1.0
-        b = (max(stops) if stops else (t[-1] if len(t) else 0)) - 0.6
+        skip_on, skip_off = self._transients(seq)
+        a = (min(starts) if starts else (t[0] if len(t) else 0)) + skip_on
+        b = (max(stops) if stops else (t[-1] if len(t) else 0)) - skip_off
         m = (t >= a) & (t <= b)
         return m if m.sum() >= 10 else np.ones(len(t), bool)
 
@@ -567,8 +573,9 @@ class DataLayer:
         ev = self.events(seq)
         starts = [e["t_s"] for e in ev if e.get("type") == "arc_start"]
         stops = [e["t_s"] for e in ev if e.get("type") == "arc_stop"]
-        t_on = (min(starts) if starts else float(df["t_s"].iloc[0])) + 1.0
-        t_off = (max(stops) if stops else float(df["t_s"].iloc[-1])) - 0.6
+        skip_on, skip_off = self._transients(seq)
+        t_on = (min(starts) if starts else float(df["t_s"].iloc[0])) + skip_on
+        t_off = (max(stops) if stops else float(df["t_s"].iloc[-1])) - skip_off
         out = []
         for param, (lo, hi) in lim.items():
             if param not in df.columns or not df[param].notna().any():

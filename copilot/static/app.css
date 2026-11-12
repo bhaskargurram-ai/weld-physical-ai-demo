@@ -450,7 +450,7 @@ details.trace pre { margin: 0; padding: 0 10px 10px; white-space: pre-wrap; font
 .prow .meta .mi { color: var(--dim); font-size: 10.5px; }
 .prow.sim { background: repeating-linear-gradient(135deg, transparent 0 8px, rgba(255, 138, 61, .035) 8px 16px); }
 .simtag { font: 700 8.5px var(--mono); letter-spacing: .6px; color: #ffd0ad; border: 1px solid rgba(255, 138, 61, .5); border-radius: 3px; padding: 0 3px; margin-left: 5px; vertical-align: 1px; }
-.prow .tags .badge { max-width: 132px; overflow: hidden; text-overflow: ellipsis; }
+.prow .tags .badge { max-width: 116px; overflow: hidden; text-overflow: ellipsis; }
 
 .rh-main { min-width: 0; }
 .prov { margin-top: 5px; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -492,8 +492,13 @@ details.trace pre { margin: 0; padding: 0 10px 10px; white-space: pre-wrap; font
   font-size: 8px; margin-left: 4px; color: var(--muted); vertical-align: 1px; }
 .chart-note { display: grid; grid-template-columns: 112px 1fr; align-items: center; height: 19px; font-size: 10.5px; color: var(--dim);
   border-bottom: 1px solid rgba(38, 46, 57, .6); }
-.chart-note .n { text-transform: uppercase; letter-spacing: .4px; text-decoration: line-through; text-decoration-color: rgba(134, 145, 160, .5); }
-.chart-note span:last-child { font-style: italic; padding-left: 46px; }
+.chart-note .n { text-transform: uppercase; letter-spacing: .4px; }
+.chart-note span:last-child { font-style: italic; padding-left: 46px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prow > div:nth-child(2) { min-width: 0; }
+.prow .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prow .tags .vtag { padding: 1px 4px; }
+.spool-h > span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.spool-h { gap: 6px; }
 .ndt-row { border-bottom: 0; border-top: 1px solid var(--line); }
 .ndt-row .chart-lbl .n { color: var(--text-2); }
 .ndt-sum { font: 600 10.5px var(--mono); color: #ff9c9c; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

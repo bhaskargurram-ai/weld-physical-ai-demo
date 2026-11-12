@@ -74,7 +74,8 @@ function rtBadge(rt, counts, title, short = false) {
   let txt = full;
   if (short && k === "indications") {
     const top = Object.entries(counts || {}).sort((a, b) => b[1] - a[1]);
-    txt = top.length ? `${prettyDef(top[0][0]).replace("lack of fusion", "LoF").replace("slag inclusion", "slag")} ×${top[0][1]}${top.length > 1 ? " +" : ""}` : "indications";
+    const SHORT = { lack_of_fusion: "LoF", slag_inclusion: "slag", metallic_inclusion: "metal incl.", incomplete_penetration: "IP" };
+    txt = top.length ? `${SHORT[top[0][0]] || prettyDef(top[0][0])} ×${top[0][1]}${top.length > 1 ? " +" : ""}` : "indications";
   }
   return h("span", { class: `badge ${RT_CLASS[k] || "pending"}`, title: title || full }, `${ICON[k] || ""} ${txt}`);
 }
@@ -197,7 +198,7 @@ function renderFloor() {
         jb.append(h("div", { class: `prow ${rtClass(p)} ${p.sequence_name === S.seq ? "active" : ""} ${p.synthetic ? "sim" : ""}`, "data-seq": p.sequence_name,
           onclick: () => selectPass(p.sequence_name), title: p.sequence_name },
           h("div", { class: "stripe" }),
-          h("div", {}, h("div", { class: "nm" }, `${passLabel(p)} ${p.pass_type || ""}`, h("small", {}, p.process),
+          h("div", {}, h("div", { class: "nm" }, `${passLabel(p)} ${p.pass_type || ""}`, real && !p.synthetic ? null : h("small", {}, p.process),
               p.synthetic && real ? h("span", { class: "simtag" }, "SIMULATED") : null),
             h("div", { class: "meta" }, h("span", {}, `${fmt(p.duration_s, 0)} s`),
               p.has_video ? h("span", { class: "mi", title: "Process video" }, "▶ video") : null,
@@ -535,12 +536,17 @@ function buildCharts() {
   const box = $("#charts");
   box.innerHTML = "";
   const sig = S.sig, wps = sig.wps || {};
-  const params = chartParams();
   const notes = Object.entries(sig.notes || {}).filter(([p, n]) => CHART_PARAMS.includes(p) || (Object.values(TRAIL).includes(p) && !n.includes("RMS shown")));
   const wins = S.detail.defect_windows || [];
   const strip = wins.length > 0 || (S.detail.ndt && S.detail.ndt.inspected !== undefined && !S.detail.source?.synthetic);
   const stripH = strip ? 22 : 0;
-  const avail = box.clientHeight - 30 - notes.length * 19 - stripH;
+  const avail = box.clientHeight - 30 - (notes.length ? 19 : 0) - stripH;
+  // keep as many plots as fit at a readable height; measured signals before the derived heat input
+  const PRIO = ["current_a", "voltage_v", "travel_speed_mmps", "gas_lpm", "interpass_c", "heat_input_kj_mm"];
+  const fit = Math.max(1, Math.floor(avail / 46));
+  const keep = new Set(PRIO.filter((p) => sig.series[p]).slice(0, fit));
+  const params = chartParams().filter((p) => keep.has(p));
+  const dropped = chartParams().filter((p) => !keep.has(p));
   const height = Math.max(40, Math.floor(avail / Math.max(params.length, 1)) - 1);
   const sync = uPlot.sync("weld");
   const basis = sig.wps_basis || S.detail.wps_basis;
@@ -568,8 +574,10 @@ function buildCharts() {
     u.over.addEventListener("mouseleave", () => showVal(p, null));
     S.charts.push({ p, u, el, lim, trail });
   });
-  for (const [p, note] of notes) {
-    box.append(h("div", { class: "chart-note" }, h("span", { class: "n" }, SIG[p]?.n || p), h("span", {}, note)));
+  if (notes.length || dropped.length) {
+    const txt = notes.map(([p, n]) => `${SIG[p]?.n || p}: ${n.replace(/^.*?: (?=AC)/, "")}`)
+      .concat(dropped.length ? [`${dropped.map((p) => SIG[p].n).join(", ")}: in the HUD and chat (no room to plot)`] : []);
+    box.append(h("div", { class: "chart-note", title: txt.join("\n") }, h("span", { class: "n" }, "Not plotted"), h("span", {}, txt.join(" · "))));
   }
   if (strip) buildNdtStrip(box, sync, stripH);
   S.lastT = null;
@@ -644,7 +652,7 @@ function resizeCharts() {
   const strip = S.charts.find((c) => c.strip);
   const plots = S.charts.filter((c) => !c.strip);
   const notes = $$(".chart-note", box).length;
-  const height = Math.max(40, Math.floor((box.clientHeight - 30 - notes * 19 - (strip ? 22 : 0)) / Math.max(plots.length, 1)) - 1);
+  const height = Math.max(40, Math.floor((box.clientHeight - 30 - (notes ? 19 : 0) - (strip ? 22 : 0)) / Math.max(plots.length, 1)) - 1);
   plots.forEach((c, i) => c.u.setSize({ width: Math.max(100, c.el.clientWidth), height: height + (!strip && i === plots.length - 1 ? 18 : 0) }));
   if (strip) strip.u.setSize({ width: Math.max(100, strip.el.clientWidth), height: 22 + 18 });
 }
@@ -909,7 +917,9 @@ function cardVerdict(c) {
     h("span", {}, (d.type || "").replace(/_/g, " ")), h("div", { class: "bar" }, h("i", { style: { width: `${Math.round((d.confidence || 0) * 100)}%` } })),
     h("span", { class: "pc" }, `${Math.round((d.confidence || 0) * 100)}%`),
     h("span", { class: "at", title: "Jump replay", onclick: () => selectPass(c.sequence_name, d.t_abs ?? c.t0_s) }, d.t_abs != null ? `@${fmt(d.t_abs)}s` : ""))));
-  const findings = (c.wps_findings || []).filter((f) => !f.status || f.status !== "within").map((f) => h("li", {}, f.note || `${f.param}: ${f.value} (WPS ${f.limit_lo ?? "—"}–${f.limit_hi ?? "—"}) ${f.t_start_s != null ? `@ ${fmt(f.t_start_s)}–${fmt(f.t_end_s)} s` : ""}`));
+  const allF = (c.wps_findings || []).filter((f) => !f.status || f.status !== "within");
+  const findings = allF.slice(0, 5).map((f) => h("li", {}, f.note || `${SIG[f.param]?.n || f.param}: ${fmt(f.value, SIG[f.param]?.d ?? 2)} (${isReal() ? "settings" : "WPS"} ${f.limit_lo ?? "—"}–${f.limit_hi ?? "—"}) ${f.t_start_s != null ? `@ ${fmt(f.t_start_s)}–${fmt(f.t_end_s)} s` : ""}`));
+  if (allF.length > 5) findings.push(h("li", { class: "sub" }, `… ${allF.length - 5} more excursions (${[...new Set(allF.map((f) => SIG[f.param]?.n || f.param))].join(", ")})`));
   const src = String(c.source || "");
   const srcClass = src.includes("heuristic") || src.includes("mock") ? "warn" : src.includes("cache") ? "neutral" : "ok";
   return h("div", { class: "card verdict" },
@@ -925,7 +935,7 @@ function cardVerdict(c) {
     h("div", { class: "kv" },
       h("div", { class: "k" }, c.ndt_indications ? "Cause (evidence)" : "Root cause"), h("div", {}, c.root_cause || "—"),
       h("div", { class: "k" }, "Recommended action"), h("div", {}, c.recommended_action || "—"),
-      findings.length ? [h("div", { class: "k" }, "WPS findings"), h("ul", {}, findings)] : null,
+      findings.length ? [h("div", { class: "k" }, isReal() ? "Outside published settings" : "WPS findings"), h("ul", {}, findings)] : null,
       c.code_basis ? [h("div", { class: "k" }, "Code basis"), h("div", {}, c.code_basis)] : null),
     c.reasoning ? h("details", { class: "trace" }, h("summary", {}, "Reasoning trace"), h("pre", {}, c.reasoning)) : null,
     h("div", { class: "card-f" }, h("span", { class: `badge ${srcClass}` }, `source · ${src || "?"}`),

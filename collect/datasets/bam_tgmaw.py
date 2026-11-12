@@ -1077,9 +1077,15 @@ def euler_xyz_to_quat(ang_deg: np.ndarray) -> np.ndarray:
 
 def convert(raw_dir: Path, out_dir: Path, wids: Optional[list[int]] = None, layers=None, video: bool = True,
             overwrite: bool = True, report: bool = True, **opts) -> list[str]:
-    """Convert every downloaded layer of the chosen workpieces into ``out_dir/WID<w>_L<n>_TGMAW``."""
+    """Convert every downloaded layer of the chosen workpieces into ``out_dir/WID<w>_L<n>_TGMAW``.
+
+    wids=None converts every workpiece found under ``raw_dir``. Returns the sequence names written."""
     raw_dir, out_dir = Path(raw_dir), Path(out_dir)
-    wids = parse_wids(wids if wids is not None else opts.get("bam_wids"))
+    if wids is None and opts.get("bam_wids") is None:
+        # convert whatever has been downloaded (download() decides which workpieces are present)
+        wids = [w for w in ALL_WIDS if any(raw_dir.glob(f"WID{w}_L*/WID{w}_L*_process.nc"))] or list(DEFAULT_WIDS)
+    else:
+        wids = parse_wids(wids if wids is not None else opts.get("bam_wids"))
     layers = parse_layers(layers)
     exp_path = raw_dir / "experiment_list.csv"
     exp = read_experiment_list(exp_path) if exp_path.exists() else None

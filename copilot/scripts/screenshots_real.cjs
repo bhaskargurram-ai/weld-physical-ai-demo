@@ -37,10 +37,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const d0 = await page.evaluate((s) => Object.keys(S.passes.find((p) => p.sequence_name === s).defect_counts || {})[0] || "porosity", saw);
   await say(`Show ${d0.replace(/_/g, " ")} on ${sawRef} — did the arc signals change?`);
   await page.evaluate(() => setView("photo"));
-  await sleep(1200);
-  // hover the first indication on the NDT strip for the tooltip
+  await sleep(600);
+  // park the playhead in the densest stretch of indications, then hover one on the NDT strip for its tooltip
+  await page.evaluate(() => {
+    const ws = S.detail.defect_windows.filter((w) => w.t_start > 4 && w.t_end - w.t_start < 3);
+    const best = ws.map((w) => [w, ws.filter((x) => Math.abs(x.t_start - w.t_start) < 6).length]).sort((a, b) => b[1] - a[1])[0];
+    if (best) seek(best[0].t_start + 1);
+  });
+  await sleep(900);
   const box = await page.evaluate(() => {
-    const st = S.charts.find((c) => c.strip); const w = S.detail.defect_windows[0];
+    const st = S.charts.find((c) => c.strip); const t = currentT();
+    const w = S.detail.defect_windows.filter((x) => x.t_end - x.t_start < 3).sort((a, b) => Math.abs(a.t_start - t + 2) - Math.abs(b.t_start - t + 2))[0];
     if (!st || !w) return null;
     const r = st.u.over.getBoundingClientRect();
     return { x: r.left + st.u.valToPos((w.t_start + w.t_end) / 2, "x"), y: r.top + r.height / 2 };
@@ -55,9 +62,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     || S.passes.find((p) => p.has_video && !p.synthetic && p.electrodes > 1)?.sequence_name, BAM);
   const bamRef = bam.replace(/^(WID\d+)_L(\d+)_.*/, "$1 layer $2");
   await say(`Compare lead vs trail current on ${bamRef}`);
-  await page.evaluate((s) => selectPass(s, 4.2, "torch"), bam);
-  await sleep(1800);
-  await page.evaluate(() => { document.querySelector("#vMain").pause(); });
+  await page.evaluate((s) => selectPass(s, 10.0, "torch"), bam);
+  await page.waitForFunction(() => { const v = document.querySelector("#vMain"); return v.readyState >= 2 && !v.seeking && v.currentTime > 9; },
+    null, { timeout: 30000 }).catch(() => console.log("video not ready"));
+  await page.evaluate(() => { const v = document.querySelector("#vMain"); v.pause(); v.currentTime = 10.0; });
+  await sleep(1500);
   await scrollChat(1);
   await shot("bam_video");
 
