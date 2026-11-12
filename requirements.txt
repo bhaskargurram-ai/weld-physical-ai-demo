@@ -20,3 +20,11 @@ sse-starlette
 boto3
 pyyaml
 huggingface_hub
+# real public datasets (collect/datasets: AIMEN SAW HDF5 + xlsx/pdf, BAM tandem-GMAW NetCDF)
+h5py
+xarray
+h5netcdf
+netCDF4
+openpyxl
+pypdf
+pillow

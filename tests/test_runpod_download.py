@@ -34,10 +34,11 @@ def test_demo_preset_maps_volume_paths_into_local_data_and_is_resumable(tmp_path
     files = {
         "results/20261111T1/dataset_card.md": b"card",
         "logs/run-1.log": b"log",
-        "weld-physical-ai-demo/data/cache/worldmodels/assess/ab.json": b"{}",
-        "weld-physical-ai-demo/data/curated/clips/c1.mp4": b"mp4",
-        "weld-physical-ai-demo/data/generated/SP-1043_J07_P3_FCAW/meta.json": b"{}",
-        "weld-physical-ai-demo/data/generated/": b"",                      # directory marker
+        "weld-physical-ai-demo/data/real/cache/worldmodels/assess/ab.json": b"{}",
+        "weld-physical-ai-demo/data/real/curated/clips/c1.mp4": b"mp4",
+        "weld-physical-ai-demo/data/real/generated/PP5_B02_SAW/meta.json": b"{}",
+        "weld-physical-ai-demo/data/real/generated/": b"",                 # directory marker
+        "weld-physical-ai-demo/data/real/raw/aimen_saw/big.hdf5": b"x" * 10,  # raw downloads never fetched
         "weld-physical-ai-demo/.venv/bin/python": b"x",                    # never downloaded
     }
     s3 = FakeS3(files)
@@ -45,9 +46,10 @@ def test_demo_preset_maps_volume_paths_into_local_data_and_is_resumable(tmp_path
     assert n_new == 5 and n_same == 0 and total == len(b"card" + b"log" + b"{}" + b"mp4" + b"{}")
     assert (tmp_path / "runpod_results/20261111T1/dataset_card.md").read_bytes() == b"card"
     assert (tmp_path / "runpod_results/logs/run-1.log").exists()
-    assert (tmp_path / "data/cache/worldmodels/assess/ab.json").exists()
-    assert (tmp_path / "data/curated/clips/c1.mp4").read_bytes() == b"mp4"
-    assert (tmp_path / "data/generated/SP-1043_J07_P3_FCAW/meta.json").exists()
+    assert (tmp_path / "data/real/cache/worldmodels/assess/ab.json").exists()
+    assert (tmp_path / "data/real/curated/clips/c1.mp4").read_bytes() == b"mp4"
+    assert (tmp_path / "data/real/generated/PP5_B02_SAW/meta.json").exists()
+    assert not (tmp_path / "data/real/raw").exists()
     assert not list(tmp_path.rglob("*.part"))
     # second run: nothing new
     s3.downloads.clear()

@@ -79,10 +79,11 @@ def main() -> int:
         return 1
 
     if not args.fixtures:
-        found = data_report(Path(os.environ.get("DATA_DIR") or ROOT / "data"))
+        from copilot import config as cconf             # same choice the app makes: data/real when it has passes
+        found = data_report(cconf.data_dir())
         if not found:
             print("\nNo weld passes found, so the copilot would be empty. Either:\n"
-                  "  python runpod/download.py demo          # download the GPU run's data into ./data\n"
+                  "  python runpod/download.py demo          # download the GPU run's data into ./data/real\n"
                   "  python scripts/run_copilot.py --fixtures  # or start with built-in mock data")
             return 1
 
