@@ -60,7 +60,7 @@ DEFAULTS = {
     "IMAGE": "runpod/pytorch:2.1.0-cu1300-torch2130-ubuntu2404",
     "CONTAINER_DISK_GB": "80",
     "VOLUME_NAME": "weldworld",
-    "VOLUME_SIZE_GB": "300",
+    "VOLUME_SIZE_GB": "150",
     "DATA_CENTER": "",
     "DELETE_VOLUME_AT_END": "0",
     # automatic fallbacks when the preferred GPU is sold out (each can be turned off with 0 / empty)

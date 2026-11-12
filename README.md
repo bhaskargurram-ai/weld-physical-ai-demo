@@ -121,14 +121,14 @@ python3 runpod/launch.py      # or: make cloud-run   (make cloud-serve keeps the
 
 `runpod/launch.py` uses only the Python standard library. It:
 
-1. creates (or reuses) a **300 GB network volume** in the data center with the best stock for `GPU_TYPE`
+1. creates (or reuses) a **150 GB network volume** in the data center with the best stock for `GPU_TYPE`
 2. creates the **GPU pod** (default 2× H100 80GB, CUDA 13 host) with the volume at `/workspace` and your keys as env vars
 3. the pod clones this repo and runs `runpod/pod_entry.sh`: bootstrap → Mosaico → fetch real data (all BAM workpieces)/ingest/export →
    Cosmos Curator → Cosmos 3 servers → warm cache → results in `/workspace/results/` (on the volume)
 4. streams the pod logs to your terminal and **terminates the pod when the code ends** — on success, on failure,
    on Ctrl-C, or after `MAX_HOURS`. The pod also terminates itself, so nothing keeps billing if your laptop sleeps.
 
-The volume is kept (models + venvs + results, about $21/month) so the next run starts in minutes;
+The volume is kept (models + venvs + results, about $10.50/month) so the next run starts in minutes;
 `python3 runpod/launch.py down --delete-volume` (or `DELETE_VOLUME_AT_END=1`) removes it.
 Download results to your computer (no pod needed; uses the volume's S3 API, needs `pip install boto3` and an
 S3 API key in `.env`): `python runpod/download.py` (summaries and logs) or `python runpod/download.py demo`
@@ -139,7 +139,7 @@ volume where GPUs are free (its cached weights are re-downloaded). All settings 
 
 ## Quickstart C: manual setup on a Runpod pod (live Cosmos 3 + Curator)
 
-Recommended: **2× H100 80GB** (about $8/hr Secure Cloud) with a **300 GB network volume** at `/workspace`, CUDA 13
+Recommended: **2× H100 80GB** (about $8/hr Secure Cloud) with a **150 GB network volume** at `/workspace`, CUDA 13
 host (driver ≥ 580). Budget: 1× H100 (Reasoner + FP8 Generator with offload).
 
 ```bash

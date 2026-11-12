@@ -85,12 +85,12 @@ with `nvidia-smi`: the header must show `Driver Version: 580.x` or newer and `CU
 
 ---
 
-## 3. Create the network volume (≥ 300 GB)
+## 3. Create the network volume (150 GB)
 
 Console → **Storage → Network Volumes → New**. Pick a data center that has the GPUs you want, and give it a name such as
-`weldworld` and a size of **300 GB**.
+`weldworld` and a size of **150 GB**.
 
-- Price: **$0.07/GB/month** for the first TB, so 300 GB costs about **$21/month**. A volume can grow later but cannot shrink
+- Price: **$0.07/GB/month** for the first TB, so 150 GB costs about **$10.50/month**. A volume can grow later but cannot shrink
   ([docs](https://docs.runpod.io/storage/network-volumes)).
 - It replaces the pod's volume disk and is **mounted at `/workspace`**. It is **Secure Cloud only** and must be
   **attached at deploy time**: you can't add it to a running pod.
@@ -103,10 +103,11 @@ Space budget (measured from Hugging Face repo sizes):
 | `nvidia/Cosmos3-Nano` (Reasoner, Generator, Transfer: one checkpoint) | 34 GB |
 | `nvidia/Cosmos3-Nano-FP8` (only with `GENERATOR_PRECISION=fp8-ckpt`; the default `fp8` quantises online) | 21 GB |
 | Curator models: `Qwen/Qwen3.8-27B-FP8` captioner, TransNetV2, Cosmos-Embed1-336p | about 32 GB |
-| Curator pixi env + vLLM venvs (`/workspace/cosmos`) + uv/pixi caches | about 60–80 GB |
+| Curator pixi env + vLLM venvs (`/workspace/cosmos`) + repo venv + uv Pythons | about 35 GB |
+| uv / pixi / rattler download caches | 30–50 GB, **on the container disk**, not the volume |
 | optional `nvidia/Cosmos3-Nano-Sim-Transfer` (`WITH_SIM_TRANSFER=1`) | 31 GB |
-| data, logs, Mosaico store, generated videos | 10–30 GB |
-| **Total** | **about 180–250 GB → 300 GB leaves headroom** |
+| real data (AIMEN 1.2 GB + all BAM ~5 GB raw), converted passes, clips, Mosaico store, logs | about 15 GB |
+| **Total** | **about 115 GB → 150 GB leaves ~35 GB headroom** (add 30 GB per optional model) |
 
 ---
 
