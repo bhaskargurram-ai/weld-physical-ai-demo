@@ -293,3 +293,23 @@ def test_photo_what_if_mock_renders_from_still(client, monkeypatch):
     res = wm.what_if("PP5_B02_SAW", "travel speed -20%", progress=lambda *_: None)
     assert res["source_image_url"].endswith(".jpg") and res["video_url"].endswith(".mp4") and "mock" in res["source"]
     asyncio.run(asyncio.sleep(0))
+
+
+def test_mosaico_rows_without_a_local_pass_dir_are_not_listed(tmp_path, monkeypatch):
+    """A long-lived mosaicod can still hold another run's sequences (e.g. the simulator's SP-1043 passes):
+    they must not appear in a real-data copilot."""
+    from copilot import data as data_mod
+    from copilot.fixtures_real import aimen_pass
+    gen = tmp_path / "generated"
+    aimen_pass(gen, "PP5", 2, 20.0, 1)
+    real = sorted(p.name for p in gen.iterdir() if (p / "meta.json").exists())
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    class FakeMosaico:
+        @staticmethod
+        def list_passes():
+            return [{"sequence_name": real[0]}, {"sequence_name": "SP-1043_J07_P3_FCAW"}]
+
+    monkeypatch.setattr(data_mod, "_mosaico", lambda: FakeMosaico)
+    rows = data_mod.DataLayer().all_passes()
+    assert [r["sequence_name"] for r in rows] == real

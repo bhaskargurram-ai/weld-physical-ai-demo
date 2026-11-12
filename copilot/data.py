@@ -266,15 +266,18 @@ class DataLayer:
             self.last_source = "local"
         if self.last_source != "local":
             # mosaico rows are flattened: the pass dir's meta.json is the source of truth for provenance/NDT/media
+            # A long-lived mosaicod can hold sequences from other runs (e.g. the simulator): list only passes that
+            # exist in this DATA_DIR, so a real-data copilot never mixes in simulated welds.
             merged = []
             for r in raw:
                 seq = r.get("sequence_name") or r.get("name")
                 mp = self.pass_dir(seq) / "meta.json" if seq else None
-                if mp is not None and mp.exists():
-                    try:
-                        r = {**r, **json.loads(mp.read_text(encoding="utf-8"))}
-                    except ValueError:
-                        pass
+                if mp is None or not mp.exists():
+                    continue
+                try:
+                    r = {**r, **json.loads(mp.read_text(encoding="utf-8"))}
+                except ValueError:
+                    pass
                 merged.append(r)
             raw = merged
         rows = [_normalize_row(r) for r in raw if (r.get("sequence_name") or r.get("name"))]
