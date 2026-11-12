@@ -150,7 +150,8 @@ def analyze(path: str | Path) -> tuple[dict, np.ndarray]:
     glare_frac  mean fraction of saturated pixels (>=250) - arc glare / blown highlights
     dark_frac   mean fraction of near-black pixels (<16)
     mean_luma   mean grey level 0-255
-    arc_on_frac fraction of sampled frames with a visible arc (>=0.2 % saturated pixels)
+    arc_on_frac fraction of sampled frames with a visible arc (>=0.05 % of pixels at grey >=220; the arc core
+                is a small spot in a dark torch-cam frame, measured 0.16-0.74 % on arc-on frames, ~0 when off)
     """
     frames, fps, step = _read_gray_frames(path)
     if len(frames) < 2:
@@ -158,6 +159,7 @@ def analyze(path: str | Path) -> tuple[dict, np.ndarray]:
     lap = [float(cv2.Laplacian(f, cv2.CV_64F).var()) for f in frames]
     diffs = [float(np.mean(cv2.absdiff(a, b))) / step for a, b in zip(frames, frames[1:])]
     sat = [float(np.mean(f >= 250)) for f in frames]
+    bright = [float(np.mean(f >= 220)) for f in frames]
     dark = [float(np.mean(f < 16)) for f in frames]
     q = {
         "blur": round(float(np.median(lap)), 3),
@@ -165,7 +167,7 @@ def analyze(path: str | Path) -> tuple[dict, np.ndarray]:
         "glare_frac": round(float(np.mean(sat)), 4),
         "dark_frac": round(float(np.mean(dark)), 4),
         "mean_luma": round(float(np.mean([f.mean() for f in frames])), 2),
-        "arc_on_frac": round(float(np.mean([s >= 0.002 for s in sat])), 3),
+        "arc_on_frac": round(float(np.mean([b >= 0.0005 for b in bright])), 3),
     }
     # visual embedding: EMBED_FRAMES evenly spaced frames at 16x9, per-frame standardised, + luma hist
     idx = np.linspace(0, len(frames) - 1, EMBED_FRAMES).round().astype(int)
