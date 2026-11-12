@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .prompts import SIGNAL_LABELS, describe_pass, normalize_context
+from .prompts import SIGNAL_LABELS, describe_pass, is_real, normalize_context
 
 # violation param (+direction) -> (likely defect, root cause text)
 _PARAM_CAUSES = {
@@ -24,6 +24,18 @@ _PARAM_CAUSES = {
     ("heat_input_kj_mm", "low"): ("lack_of_fusion", "heat input below the qualified range"),
     ("heat_input_kj_mm", "high"): ("burn_through", "heat input above the qualified range (also a Sec IX supplementary essential variable concern)"),
     ("interpass_c", "high"): ("crack", "interpass temperature above the WPS maximum raises cracking risk"),
+    ("current2_a", "low"): ("lack_of_fusion", "trail-electrode current below the range lowers heat input and fill"),
+    ("current2_a", "high"): ("burn_through", "trail-electrode current above the range adds excess heat"),
+    ("voltage2_v", "high"): ("undercut", "trail-electrode voltage above the range widens the arc and melts the toes"),
+    ("voltage2_v", "low"): ("arc_instability", "trail-electrode voltage below the range destabilises the trail arc"),
+    ("wfs2_mpm", "high"): ("arc_instability", "trail wire feed above the range destabilises metal transfer"),
+    ("wfs2_mpm", "low"): ("lack_of_fusion", "trail wire feed below the range reduces deposition"),
+}
+
+# real-data causes when the signals are normal (no electrical signature): process-specific candidates
+_SILENT_CAUSE = {
+    ("porosity", "SAW"): "flux moisture or contamination (joint surface, wire) - typical SAW porosity causes that do not show in current/voltage",
+    ("porosity", "GMAW"): "shielding-gas coverage (draughts, nozzle spatter) or surface contamination",
 }
 
 _DEFECT_CAUSE = {
@@ -59,12 +71,15 @@ def _defect_list(c: dict) -> list[dict]:
         if dtype in ("", "none"):
             continue
         sev = d.get("severity")
+        known = isinstance(sev, (int, float))
         ts = d.get("t_start", d.get("t_start_s", d.get("t_s")))
         t_rel: Optional[float] = None
         if isinstance(ts, (int, float)):
             t_rel = float(ts) - t0 if ts >= t0 else float(ts)
             t_rel = max(0.0, t_rel)
-        out.append({"type": dtype, "severity": float(sev) if isinstance(sev, (int, float)) else 0.6, "t_s": t_rel})
+        out.append({"type": dtype, "severity": float(sev) if known else 0.6, "severity_known": known, "t_s": t_rel,
+                    "x_start_mm": d.get("x_start_mm"), "x_end_mm": d.get("x_end_mm"),
+                    "ndt": d.get("source") == "NDT" or not known})
     return out
 
 
@@ -126,28 +141,59 @@ def assess(context: Optional[dict]) -> dict:
 
     max_sev = max((d["severity"] for d in defects), default=0.0)
     severe = any(d["type"] in _SEVERE for d in defects)
-    if defects and (severe or max_sev >= 0.5):
+    # real NDT indications carry no severity: rejectable-at-any-size types reject, the rest need the size
+    sev_unknown = bool(defects) and not any(d["severity_known"] for d in defects)
+    if defects and (severe or (max_sev >= 0.5 and not sev_unknown)):
         verdict = "reject"
     elif defects or violations:
         verdict = "review"
     else:
         verdict = "accept"
 
+    real = is_real(c)
+    proc = str(c.get("process") or "").upper()
+    # explicit "no electrical signature" statement whenever the logged signals are normal
+    silent = not violations
+    sig_note = ("The logged arc, travel and thermal signals stay inside the nominal window: no electrical signature"
+                + (" of it" if defects else "") + ".")
     top = max(out_defects, key=lambda d: d["confidence"], default=None)
-    if top:
+    if top and defects and real and silent:
+        d0 = next(d for d in defects if d["type"] == top["type"])
+        where = (f" at x={d0['x_start_mm']}-{d0['x_end_mm']} mm" if d0.get("x_start_mm") is not None
+                 and d0.get("x_end_mm") is not None else "")
+        cause = _SILENT_CAUSE.get((top["type"], proc), _DEFECT_CAUSE.get(top["type"], "a process upset"))
+        root = (f"NDT reported {top['type'].replace('_', ' ')}{where} in this window. {sig_note} The cause cannot be "
+                f"read from the sensor data; candidates: {cause}.")
+        act = _DEFECT_ACTION.get(top["type"], "repair and re-inspect if rejectable.")
+        if top["type"] == "porosity" and proc == "SAW":
+            act = ("If rejectable, grind out the porous length, check flux drying / storage and joint and wire "
+                   "cleanliness, re-weld and RT the repair.")
+        action = "Check the indication size against the acceptance criteria in the RT/UT report. " + act
+    elif top:
         root = f"Most likely {top['type'].replace('_', ' ')}: {_DEFECT_CAUSE.get(top['type'], 'process excursion')}."
         if causes:
             root += " Logged excursion: " + causes[0] + "."
+        elif real:
+            root += " " + sig_note
         action = _DEFECT_ACTION.get(top["type"], "Hold the joint for RT/UT and review the process data.")
     elif causes:
         root = "WPS excursion without a visible defect: " + causes[0] + "."
         action = "Hold for NDE (RT/UT) of the affected length and correct the parameter before the next pass."
     else:
-        root = "All logged parameters within the WPS envelope; no defect evidence."
+        root = (f"All logged parameters within the {'nominal window' if real else 'WPS envelope'}; "
+                "no electrical signature of a defect.")
         action = "Accept; proceed to the next pass / NDE per the inspection test plan."
-    if c.get("rt_result") == "reject" and verdict == "accept":
+    rt = c.get("rt_result")
+    if rt == "reject" and verdict == "accept":
         verdict = "review"
         action = "RT reported a reject on this joint although this window looks clean: review the full pass."
+    elif rt == "indications" and not defects:
+        root += " NDT found indications elsewhere in this pass, not in this window."
+    elif rt == "not_inspected" and verdict == "accept":
+        root += " This pass was not NDT-inspected, so there is no ground truth for subsurface defects."
+        action = "Accept on process data only; inspect (VT, and RT/UT where required) per the inspection plan."
+    elif rt == "no_indications" and verdict == "accept":
+        root += " NDT (RT/UT) found no indication in this pass."
 
     return {
         "verdict": verdict,
@@ -155,7 +201,9 @@ def assess(context: Optional[dict]) -> dict:
         "root_cause": root,
         "wps_findings": findings,
         "recommended_action": action,
-        "code_basis": "Rule-based: B31.3 Table 341.3.2 (cracks / LOF rejectable at any size) + WPS ranges (ASME Sec IX).",
+        "code_basis": ("Rule-based: cracks / LOF rejectable at any size (B31.3 Table 341.3.2, ISO 5817); porosity "
+                       "acceptance depends on size from the RT/UT report; nominal parameter ranges "
+                       + ("(published setting ±10 %, demo assumption)." if real else "(ASME Sec IX WPS).")),
         "reasoning": ("Heuristic fallback (no Cosmos Reasoner reachable and no cached answer): verdict derived from "
                       f"{len(defects)} annotated defect(s) and {len(violations)} logged WPS excursion(s) for "
                       f"{describe_pass(c)}. Not a model judgement."),
@@ -185,5 +233,8 @@ def explain(context: Optional[dict]) -> str:
             lines.append(f"- EXCURSION {v.get('param')}={v.get('value')}: {hit[1]} -> risk of {hit[0].replace('_', ' ')}.")
     if len(lines) == 1:
         lines.append("- No sensor statistics or excursions supplied.")
+    elif not [v for v in c.get("wps_violations") or [] if isinstance(v, dict)]:
+        lines.append("- All signals inside the nominal window: no electrical signature"
+                     + (" (NDT indications can still be present: real porosity often leaves none)." if is_real(c) else "."))
     return "\n".join(lines)
 

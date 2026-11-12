@@ -7,17 +7,46 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 FIXTURE_DIR = REPO_ROOT / "data" / "fixtures"
+FIXTURE_REAL_DIR = REPO_ROOT / "data" / "fixtures_real"
+REAL_DIR = REPO_ROOT / "data" / "real"
+
+
+def fixtures_mode() -> str:
+    """'' (off) | 'sim' (COPILOT_FIXTURES=1: simulator-shaped mocks) | 'real' (COPILOT_FIXTURES=real)."""
+    v = os.environ.get("COPILOT_FIXTURES", "").lower()
+    if v == "real":
+        return "real"
+    return "sim" if v in ("1", "true", "yes", "sim") else ""
 
 
 def fixtures_enabled() -> bool:
-    return os.environ.get("COPILOT_FIXTURES", "").lower() in ("1", "true", "yes")
+    return fixtures_mode() != ""
+
+
+def dataset_choice() -> str:
+    """DATA_SOURCE=real|sim|all (docs/REAL_DATA.md); default real."""
+    v = os.environ.get("DATA_SOURCE", "real").lower()
+    return v if v in ("real", "sim", "all") else "real"
+
+
+def _has_passes(d: Path) -> bool:
+    g = d / "generated"
+    try:
+        return g.is_dir() and any((x / "meta.json").exists() for x in g.iterdir())
+    except OSError:
+        return False
 
 
 def data_dir() -> Path:
     if os.environ.get("DATA_DIR"):
         return Path(os.environ["DATA_DIR"]).resolve()
-    if fixtures_enabled():
+    fm = fixtures_mode()
+    if fm == "real":
+        return FIXTURE_REAL_DIR
+    if fm == "sim":
         return FIXTURE_DIR
+    if dataset_choice() != "sim" and _has_passes(REAL_DIR):
+        return REAL_DIR.resolve()
     return (REPO_ROOT / "data").resolve()
 
 
@@ -41,6 +70,17 @@ def localize(p: str | Path) -> Path:
 
 def generated_dir() -> Path:
     return data_dir() / "generated"
+
+
+def generated_dirs() -> list[Path]:
+    """Every pass root to list. DATA_SOURCE=all also merges the simulator's data/generated and data/real/generated
+    (when DATA_DIR is not pinned), so real and SIMULATED passes appear side by side."""
+    dirs = [generated_dir()]
+    if dataset_choice() == "all" and not os.environ.get("DATA_DIR") and not fixtures_enabled():
+        for extra in (REAL_DIR / "generated", REPO_ROOT / "data" / "generated"):
+            if extra.resolve() not in [d.resolve() for d in dirs] and extra.is_dir():
+                dirs.append(extra)
+    return dirs
 
 
 def curated_dir() -> Path:

@@ -119,6 +119,12 @@ def run_curator_legacy(input_dir: str | Path, out_dir: str | Path, *, captioner:
                 rec.quality = {"error": str(exc)}
         if not rec.caption:
             rec.caption, rec.caption_model = template_caption(rec.context(), rec.quality), TEMPLATE_MODEL
+    images = [i for i in inputs if i.is_image]
+    if images:   # the legacy video pipeline cannot read photos: lite image path
+        from curate.lite import caption_records, process_images
+        img_records, _ = process_images(images, out / "clips")
+        caption_records(img_records, "auto")
+        records += img_records
     th = thresholds or Thresholds()
     apply_filters(records, th)
     if dedup_enabled:

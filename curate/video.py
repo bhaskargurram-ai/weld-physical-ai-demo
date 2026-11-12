@@ -198,3 +198,46 @@ def embed(visual: np.ndarray, signal_stats: dict | None, w_signal: float = 0.35)
     sv = sv / n if n > 0 else sv
     out = np.concatenate([(1 - w_signal) * v, w_signal * sv]).astype(np.float32)
     return out / (np.linalg.norm(out) + 1e-9)
+
+
+# ------------------------------------------------------------------ photos (image items)
+def prepare_image(src: str | Path, dst: str | Path, max_side: int = 1600, quality: int = 92) -> tuple[int, int]:
+    """Copy a photo as JPEG (long side <= max_side, metadata dropped). Returns (width, height)."""
+    img = cv2.imread(str(src), cv2.IMREAD_COLOR)
+    if img is None:
+        raise IOError(f"cannot read image {src}")
+    h, w = img.shape[:2]
+    if max(h, w) > max_side:
+        k = max_side / max(h, w)
+        img = cv2.resize(img, (round(w * k), round(h * k)), interpolation=cv2.INTER_AREA)
+    Path(dst).parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(dst), img, [cv2.IMWRITE_JPEG_QUALITY, quality]):
+        raise IOError(f"cannot write {dst}")
+    return img.shape[1], img.shape[0]
+
+
+def analyze_image(path: str | Path) -> tuple[dict, np.ndarray]:
+    """Quality metrics + visual embedding part for one photo (same layout as :func:`analyze`).
+
+    blur / glare_frac / dark_frac / mean_luma as for video; ``motion`` and ``arc_on_frac`` do not apply
+    to a still and are None (the static/arc-off filters skip them)."""
+    img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise IOError(f"cannot read image {path}")
+    h, w = img.shape[:2]
+    if w > ANALYSIS_WIDTH:
+        img = cv2.resize(img, (ANALYSIS_WIDTH, max(2, round(h * ANALYSIS_WIDTH / w))), interpolation=cv2.INTER_AREA)
+    q = {
+        "blur": round(float(cv2.Laplacian(img, cv2.CV_64F).var()), 3),
+        "motion": None,
+        "glare_frac": round(float(np.mean(img >= 250)), 4),
+        "dark_frac": round(float(np.mean(img < 16)), 4),
+        "mean_luma": round(float(img.mean()), 2),
+        "arc_on_frac": None,
+    }
+    small = cv2.resize(img, (EMBED_HW[1], EMBED_HW[0]), interpolation=cv2.INTER_AREA).astype(np.float32).ravel()
+    part = (small - small.mean()) / (small.std() + 1e-3)
+    hist = np.histogram(img.ravel(), bins=16, range=(0, 256))[0].astype(np.float32)
+    hist = hist / (hist.sum() + 1e-6) * 8.0
+    visual = np.concatenate([part] * EMBED_FRAMES + [hist])
+    return q, visual

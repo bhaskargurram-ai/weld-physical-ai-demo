@@ -335,9 +335,16 @@ def run_curator_next(input_dir: str | Path, out_dir: str | Path, *, captioner: s
     from curate.video import analyze, probe
 
     out = Path(out_dir).resolve()
-    inputs = discover_inputs(input_dir)
+    all_inputs = discover_inputs(input_dir)
+    # Curator handles video only: photo-only items (AIMEN SAW bead photos) go through the lite image path
+    inputs = [i for i in all_inputs if not i.is_image]
+    images = [i for i in all_inputs if i.is_image]
+    if not inputs and not images:
+        raise SystemExit(f"no *.mp4 clips or photo sidecars found in {input_dir}")
     if not inputs:
-        raise SystemExit(f"no *.mp4 clips found in {input_dir}")
+        raise SystemExit(f"no video clips in {input_dir} for Curator ({len(images)} photo items: use --backend lite)")
+    if images:
+        log.info("curator-next: %d video clips -> Curator, %d photo items -> lite image path", len(inputs), len(images))
     s3 = s3_settings()
     uris = [s3_uri_for(i, s3) for i in inputs]
     durations = []
@@ -382,6 +389,11 @@ def run_curator_next(input_dir: str | Path, out_dir: str | Path, *, captioner: s
                 r.quality = {"error": str(exc)}
         if not r.caption:
             r.caption, r.caption_model = template_caption(r.context(), r.quality), TEMPLATE_MODEL
+    if images:
+        from curate.lite import caption_records, process_images
+        img_records, _ = process_images(images, out / "clips")
+        caption_records(img_records, "auto")
+        records += img_records
     th = thresholds or Thresholds()
     apply_filters(records, th)
     if dedup_enabled:

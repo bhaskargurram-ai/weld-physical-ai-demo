@@ -26,7 +26,8 @@ from typing import Callable
 import httpx
 
 from . import config
-from .data import DataLayer, _cached, _try_import
+from .data import DataLayer, _cached, _try_import, clean_json
+from .provenance import source_of
 
 log = logging.getLogger("copilot.models")
 Progress = Callable[[float, str], None]
@@ -214,6 +215,20 @@ def build_prompt(meta: dict, change_text: str | None, base_prompt: str | dict | 
     elif isinstance(base_prompt, dict):
         p = dict(base_prompt)
     proc = meta.get("process", "FCAW")
+    sid = source_of(meta).get("id")
+    if sid == "aimen_saw":
+        p.setdefault("subject", f"tandem submerged-arc {meta.get('pass_type', '')} bead on {meta.get('material', 'SA-516')} "
+                                f"plate, {meta.get('thickness_mm', 52)} mm butt weld")
+        p.setdefault("scene", "heavy-plate pressure-vessel welding, granular flux covering the arc, slag lifting off "
+                              "the cooled bead behind the flux hopper")
+        p.setdefault("camera", "fixed camera looking down at the bead, 24 fps")
+        p.setdefault("lighting", "shop lighting, faint orange glow under the flux")
+    elif sid == "bam_tgmaw":
+        p.setdefault("subject", f"tandem GMAW layer {meta.get('pass_no', '')} in a 30 mm V-groove on "
+                                f"{meta.get('material', 'S355')} plate, two wires feeding into one pool")
+        p.setdefault("scene", "laboratory robotic welding cell")
+        p.setdefault("camera", "side-view high-dynamic-range process camera, grayscale, fixed framing, 18 fps")
+        p.setdefault("lighting", "two bright arcs, glowing pool, dark background")
     p.setdefault("subject", f"robotic {proc} {meta.get('pass_type', '')} pass on {meta.get('material', 'carbon-steel')} pipe")
     p.setdefault("scene", "ASME pressure-piping fabrication shop weld cell, pipe on a positioner")
     p.setdefault("camera", "torch-mounted camera looking at the weld pool, 24 fps, fixed framing")
@@ -279,28 +294,55 @@ class WorldModels:
         for c in df.columns:
             if c in ("t_s", "t_ns"):
                 continue
-            s = df[c]
-            if s.dtype.kind in "fi":
+            s = df[c].dropna()
+            if s.dtype.kind in "fi" and len(s):
                 stats[c] = {"mean": round(float(s.mean()), 3), "std": round(float(s.std()), 3),
                             "min": round(float(s.min()), 3), "max": round(float(s.max()), 3)}
         viol = [v for v in self.data.wps_violations(sequence) if v["t_end_s"] >= t0 and v["t_start_s"] <= t1]
         # Same shape as the mosaico_io export sidecar (what worldmodels.reason expects as `context`).
-        return {"clip_id": None, "sequence_name": sequence, "t0_s": t0, "t1_s": t1, "meta": meta,
-                "signal_stats": stats, "wps_violations": viol,
-                "defects_in_window": [d for d in self.data.defect_windows(sequence)
-                                      if d["t_end"] >= t0 and d["t_start"] <= t1],
-                "rt_result": meta.get("rt_result"),
-                "wps_limits": self.data.wps_limits(sequence)}   # copilot-normalised (interpass as [None, max])
+        ctx = {"clip_id": None, "sequence_name": sequence, "t0_s": t0, "t1_s": t1, "meta": meta,
+               "signal_stats": stats, "wps_violations": viol,
+               "defects_in_window": [d for d in self.data.defect_windows(sequence)
+                                     if d["t_end"] >= t0 and d["t_start"] <= t1],
+               "rt_result": meta.get("rt_result"),
+               "wps_limits": self.data.wps_limits(sequence)}   # copilot-normalised (interpass as [None, max])
+        src = source_of(meta)
+        if not src.get("synthetic"):
+            ndt = self.data.ndt(sequence)
+            ctx["source"] = {k: src.get(k) for k in ("id", "title", "doi", "license")}
+            ctx["ndt"] = {"methods": ndt.get("methods"), "inspected": ndt.get("inspected"),
+                          "indications": (ndt.get("indications") or [])[:40]}
+            ctx["signal_check"] = self.data.indication_check(sequence)
+            ctx["wps_basis"] = meta.get("wps_basis")
+        return clean_json(ctx)
 
     # ---- Reasoner
     def assess(self, sequence: str | None = None, clip_id: str | None = None, t: float | None = None) -> dict:
         clip = self.resolve_clip(sequence, clip_id, t)
+        photos = [] if clip["video_path"] else self.data.photos(clip["sequence"])
+        if photos and t is None:          # a bead photo covers the whole bead: give it the whole pass as context
+            dur = float(self.data.get_meta(clip["sequence"]).get("duration_s") or clip["t1"])
+            clip["t0"], clip["t1"] = 0.0, round(dur, 2)
         ctx = self.context_for(clip["sequence"], clip["t0"], clip["t1"])
         ctx["clip_id"] = clip["clip_id"]
+        input_kind = "video" if clip["video_path"] else ("photo" if photos else "signals")
+        ctx["input_kind"] = input_kind
+        if photos:
+            ctx["image_path"] = photos[0]["path"]
         t_start = time.time()
         res, source, note = None, None, None
         reason = _try_import("worldmodels.reason")
-        if reason is not None and hasattr(reason, "assess_clip") and clip["video_path"]:
+        if reason is not None and hasattr(reason, "assess_clip") and photos:
+            try:
+                res = _assess_image(reason.assess_clip, photos[0]["path"], ctx)
+                source = (res or {}).get("source") or f"cosmos3-reasoner · {backend_mode()}"
+                if res and res.get("latency_ms") is not None:
+                    res["latency_s"] = res["latency_ms"] / 1000.0
+            except Exception as e:  # noqa: BLE001
+                note = f"worldmodels.reason image assess failed ({type(e).__name__}: {e}); rule-based fallback"
+                log.warning(note)
+                res = None
+        elif reason is not None and hasattr(reason, "assess_clip") and clip["video_path"]:
             try:
                 res = reason.assess_clip(clip["video_path"], ctx)
                 source = (res or {}).get("source") or f"cosmos3-reasoner · {backend_mode()}"
@@ -310,9 +352,15 @@ class WorldModels:
                 note = f"worldmodels.reason failed ({type(e).__name__}: {e}); heuristic fallback"
                 log.warning(note)
                 res = None
+        real = ctx.get("source") is not None
+        if res is not None and real and "heuristic" in str(res.get("source") or source or ""):
+            # worldmodels' heuristic maps defect labels to textbook causes; on real data we only report evidence
+            note = "Cosmos 3 unavailable (worldmodels heuristic); evidence-only rule check used for real data"
+            res = None
         if res is None:
             res = mock_assess(ctx)
-            source = "copilot-mock (no worldmodels)" if reason is None else "copilot-mock (fallback)"
+            source = ("copilot-mock · evidence-only rules (no Cosmos 3)" if real else
+                      "copilot-mock (no worldmodels)" if reason is None else "copilot-mock (fallback)")
         res = dict(res)
         res.setdefault("defects", [])
         res["source"] = source
@@ -328,10 +376,20 @@ class WorldModels:
         if clip["video_path"]:
             from .data import file_url
             res["video_url"] = file_url(clip["video_path"])
+        if photos:
+            res["image_url"] = photos[0]["url"]
+        res["input_kind"] = input_kind
         if note:
             res["note"] = note
         res["rt_result"] = ctx.get("rt_result")
-        return res
+        if ctx.get("ndt"):
+            ind = ctx["ndt"].get("indications") or []
+            counts: dict[str, int] = {}
+            for i in ind:
+                counts[i.get("type")] = counts.get(i.get("type"), 0) + 1
+            res["ndt_indications"] = counts
+            res["signal_check"] = ctx.get("signal_check")
+        return clean_json(res)
 
     # ---- Generator / Transfer (run inside a job thread)
     def what_if(self, sequence: str | None, change: str, clip_id: str | None = None, t: float | None = None,
@@ -348,6 +406,9 @@ class WorldModels:
         src = self.data.pass_dir(clip["sequence"]) / "torch_cam.mp4"
         if src.exists() and shutil.which("ffmpeg"):
             img = grab_frame(src, clip["t0"], config.state_dir() / "frames" / f"{clip['sequence']}_{clip['t0']:06.2f}.png")
+        photos = [] if img else self.data.photos(clip["sequence"])
+        if photos:
+            img = Path(photos[0]["path"])     # photo-only pass (AIMEN SAW): condition on the bead photo
         gen = _try_import("worldmodels.generate")
         out, info, note = None, {}, None
         t_start = time.time()
@@ -368,11 +429,15 @@ class WorldModels:
             note = "worldmodels returned a placeholder (no Cosmos backend or cached render); copilot mock render"
             out = None
         if out is None:
-            out = self._mock_video(clip["video_path"], key, f"whatif_{clip['sequence']}_{key}_{seed}", progress)
+            out = self._mock_video(clip["video_path"], key, f"whatif_{clip['sequence']}_{key}_{seed}", progress,
+                                   image=str(img) if (photos and img) else None)
             info = {"source": "copilot-mock (no worldmodels)" if gen is None else "copilot-mock (no Cosmos render)"}
-        return self._result("what_if", clip, out, info, time.time() - t_start, full_prompt,
-                            label=CHANGE_TEMPLATES.get(key or "", {}).get("label") or change, note=note,
-                            change=change)
+        res = self._result("what_if", clip, out, info, time.time() - t_start, full_prompt,
+                           label=CHANGE_TEMPLATES.get(key or "", {}).get("label") or change, note=note,
+                           change=change)
+        if photos:
+            res["source_image_url"] = photos[0]["url"]
+        return res
 
     def sim2real(self, sequence: str, kind: str = "edge", t: float | None = None, seed: int = 0,
                  prompt: str | None = None, progress: Progress | None = None) -> dict:
@@ -454,15 +519,23 @@ class WorldModels:
             raise box["err"]
         return box.get("out")
 
-    def _mock_video(self, src: str | None, key: str | None, name: str, progress: Progress) -> Path:
+    def _mock_video(self, src: str | None, key: str | None, name: str, progress: Progress,
+                    image: str | None = None) -> Path:
         out = self.out_dir / f"{_slug(name)}.mp4"
         stages = ["Encoding prompt (T5)", "Denoising step 9/35", "Denoising step 21/35", "Denoising step 35/35",
                   "Decoding latents → mp4"]
         for i, s in enumerate(stages):
             progress(0.15 + 0.16 * i, s + " · mock")
             time.sleep(float(os.environ.get("COPILOT_MOCK_DELAY", "0.5")))
-        if not src or not shutil.which("ffmpeg"):
-            raise FileNotFoundError("no source video to render a mock from")
+        if (not src and not image) or not shutil.which("ffmpeg"):
+            raise FileNotFoundError("no source video or photo to render a mock from")
+        if not src:
+            vf = CHANGE_TEMPLATES.get(key or "", {}).get("ffmpeg", "eq=saturation=1.2")
+            _ffmpeg("-loop", "1", "-i", image, "-vf", "scale='min(960,iw)':-2,crop=trunc(iw/2)*2:trunc(ih/2)*2,"
+                    "zoompan=z='min(zoom+0.0012,1.25)':d=1:s=hd720:fps=24," + vf, "-an", "-t", "5", "-c:v", "libx264",
+                    "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out))
+            progress(0.98, "Writing mp4")
+            return out
         if key == "sim2real":
             vf = ("eq=contrast=1.18:saturation=1.25:gamma=0.92,colorbalance=rs=0.08:bs=-0.06,"
                   "unsharp=5:5:0.9,noise=alls=7:allf=t,vignette=PI/4.5")
@@ -490,6 +563,20 @@ class WorldModels:
         return res
 
 
+def _assess_image(fn, image_path: str, ctx: dict) -> dict:
+    """Call worldmodels.reason.assess_clip on a still image. Codes to whichever image hook it exposes:
+    an image_path/image keyword, else the path itself (assess_clip dispatching on the .jpg suffix)."""
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        params = {}
+    for kw in ("image_path", "image", "images"):
+        if kw in params:
+            return fn(None, ctx, **{kw: [image_path] if kw == "images" else image_path})
+    return fn(image_path, ctx)
+
+
 def _mock_placeholders() -> bool:
     """Replace worldmodels' title-card placeholder videos with a labelled copilot mock render of the real clip."""
     return os.environ.get("COPILOT_MOCK_PLACEHOLDERS", "1") == "1"
@@ -502,6 +589,8 @@ def _slug(s: str) -> str:
 # ------------------------------------------------------------------ heuristic "reasoner" (mock)
 def mock_assess(ctx: dict) -> dict:
     time.sleep(float(os.environ.get("COPILOT_MOCK_DELAY", "0.5")))
+    if ctx.get("ndt") is not None or ctx.get("source"):
+        return mock_assess_real(ctx)
     defects = ctx.get("defects_in_window") or []
     viol = ctx.get("wps_violations") or []
     stats = ctx.get("signal_stats") or {}
@@ -547,3 +636,71 @@ def mock_assess(ctx: dict) -> dict:
     steps.append(f"Verdict: {verdict.upper()}.")
     return {"verdict": verdict, "defects": out_defects, "root_cause": rc, "wps_findings": findings,
             "recommended_action": act, "reasoning": "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))}
+
+
+def mock_assess_real(ctx: dict) -> dict:
+    """Rule-based stand-in for real data: reports only what the data shows. Never attributes a cause to an NDT
+    indication unless the signals actually changed inside its windows - and even then names the signal, not a story."""
+    meta = ctx.get("meta") or {}
+    seq = ctx.get("sequence_name")
+    viol = ctx.get("wps_violations") or []
+    ndt = ctx.get("ndt") or {}
+    ind = ndt.get("indications") or []
+    chk = ctx.get("signal_check") or {}
+    kind = ctx.get("input_kind") or "video"
+    counts: dict[str, int] = {}
+    for i in ind:
+        counts[i.get("type")] = counts.get(i.get("type"), 0) + 1
+    what = {"photo": "bead photo", "video": "process-camera clip", "signals": "signals only"}[kind]
+    steps = [f"{seq}: {meta.get('process')} {meta.get('pass_type')} pass, {what}, "
+             f"{ctx['t0_s']:.1f}–{ctx['t1_s']:.1f} s."]
+    if kind == "photo":
+        steps.append("Image: not analysed - Cosmos 3 Reasoner is not available, so no visual finding is claimed.")
+    elif kind == "video":
+        steps.append("Video: not analysed - Cosmos 3 Reasoner is not available, so no visual finding is claimed.")
+    for v in viol[:4]:
+        lim = f"{v['limit_lo']}–{v['limit_hi']}" if v.get("limit_lo") is not None else f"≤{v['limit_hi']}"
+        steps.append(f"Settings check: {v['param']} reached {v['value']} (window {lim}, {ctx.get('wps_basis') or 'WPS'}) "
+                     f"from {v['t_start_s']:.1f}s to {v['t_end_s']:.1f}s.")
+    if not viol:
+        steps.append("Settings check: all recorded parameters inside the published-setting window.")
+    if ndt.get("inspected"):
+        steps.append("NDT (" + "/".join(ndt.get("methods") or []) + "): " +
+                     (", ".join(f"{k.replace('_', ' ')} ×{n}" for k, n in counts.items()) if counts else "no indications"))
+    else:
+        steps.append("NDT: this pass was not inspected - no ground truth on internal defects.")
+    sig_line = None
+    if chk and chk.get("params"):
+        parts = []
+        for p, c in chk["params"].items():
+            parts.append(f"{p} {c['mean_in']} vs {c['mean_clean']} {c['unit']} "
+                         f"({c['windows_outside_band']}/{c['windows_checked']} windows outside the clean-weld band)")
+        sig_line = "; ".join(parts)
+        steps.append("Signals inside the NDT windows vs clean weld: " + sig_line + ".")
+    if counts:
+        if chk and chk.get("signature"):
+            sig_p = [p for p, c in chk["params"].items() if c["signature"]]
+            rc = (f"NDT reports {', '.join(f'{k.replace(chr(95), chr(32))} ×{n}' for k, n in counts.items())}. "
+                  f"{', '.join(sig_p)} differ inside the indication windows; that is a correlation, not a proven cause.")
+        else:
+            rc = (f"Not determinable from this data. NDT reports "
+                  f"{', '.join(f'{k.replace(chr(95), chr(32))} ×{n}' for k, n in counts.items())}, but the arc signals "
+                  f"inside the indication windows match the clean weld - no electrical signature.")
+        act = ("Disposition per the RT/UT report and the applicable acceptance criteria; repair if rejectable. The "
+               "recorded signals do not identify a cause - check records not in this dataset (flux, fit-up, cleanliness).")
+        verdict = "review"
+    elif viol:
+        rc = "No NDT indication in this pass" if ndt.get("inspected") else "No NDT ground truth for this pass"
+        rc += "; parameters left the published-setting window (demo window, not a qualified WPS)."
+        act = "Review the excursion against the real WPS before any disposition."
+        verdict = "review"
+    else:
+        rc = "No NDT indication and parameters inside the published-setting window." if ndt.get("inspected") else \
+             "Parameters inside the published-setting window; not NDT-inspected, so internal quality is unknown."
+        act = "No action from the data." if ndt.get("inspected") else "No action from the signals; NDT would be needed to confirm."
+        verdict = "accept" if ndt.get("inspected") else "review"
+    findings = [{"param": v["param"], "value": v["value"], "limit_lo": v.get("limit_lo"), "limit_hi": v.get("limit_hi"),
+                 "t_start_s": v["t_start_s"], "t_end_s": v["t_end_s"]} for v in viol]
+    steps.append(f"Verdict: {verdict.upper()} (rule-based stand-in, not a Cosmos 3 inspection).")
+    return {"verdict": verdict, "defects": [], "root_cause": rc, "wps_findings": findings, "recommended_action": act,
+            "reasoning": "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))}

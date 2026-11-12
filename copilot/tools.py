@@ -12,28 +12,37 @@ from typing import Any
 
 import numpy as np
 
-from .data import SIGNAL_INFO, SIGNALS, DataLayer, _defect_list
+from .data import BAD_RT, SIGNAL_INFO, SIGNALS, TRAIL_OF, DataLayer, _defect_list, clean_json
 from .jobs import JobManager
 from .models import CHANGE_TEMPLATES, WorldModels, parse_change
 
-PROCESSES = ["GTAW", "GMAW", "FCAW", "SMAW", "SAW"]
+PROCESSES = ["GTAW", "GMAW", "TGMAW", "FCAW", "SMAW", "SAW"]
 PASS_TYPES = ["root", "hot", "fill", "cap"]
-DEFECTS = ["porosity", "lack_of_fusion", "undercut", "burn_through", "arc_instability", "crack"]
+DEFECTS = ["porosity", "lack_of_fusion", "slag_inclusion", "metallic_inclusion", "crack", "undercut", "burn_through", "arc_instability",
+           "incomplete_penetration"]
+RT_VALUES = ["indications", "no_indications", "not_inspected", "accept", "reject", "pending"]
+SOURCES = ["aimen_saw", "bam_tgmaw", "sim"]
 
-_SEQ = {"type": "string", "description": "Weld pass sequence name, e.g. 'SP-1043_J07_P3_FCAW'. "
-                                        "Loose references like 'SP-1043 J07 fill' are resolved."}
+_SEQ = {"type": "string", "description": "Weld pass sequence name, e.g. 'PP5_B02_SAW' (AIMEN coupon PP5, bead 2) or "
+                                        "'WID617_L3_TGMAW' (BAM workpiece WID617, layer 3). Loose references like "
+                                        "'PP5 bead 2', 'PP5 B02', 'WID617 L3', 'WID617 layer 3' are resolved."}
 
 TOOL_SPECS: list[dict] = [
     {"name": "list_passes",
-     "description": "List weld passes (one Mosaico sequence per pass) with metadata: spool, joint, pass type, "
-                    "process, WPS, RT (radiography) result, defects and WPS-violation counts. Use filters to narrow.",
+     "description": "List weld passes (one Mosaico sequence per pass) with metadata: dataset/source, coupon or "
+                    "workpiece, bead/layer, process, NDT result (rt_result: indications / no_indications / "
+                    "not_inspected; simulator: accept / reject), NDT indication types and WPS-violation counts. "
+                    "Use filters to narrow.",
      "input_schema": {"type": "object", "properties": {
+         "source": {"type": "string", "enum": SOURCES, "description": "aimen_saw = AIMEN SAW coupons PP3-PP7 "
+                    "(SA-516 vessel plate, NDT), bam_tgmaw = BAM tandem-GMAW workpieces (video, no NDT), sim = simulator"},
          "process": {"type": "string", "enum": PROCESSES},
-         "spool_id": {"type": "string", "description": "e.g. SP-1043"},
+         "spool_id": {"type": "string", "description": "coupon / workpiece / spool, e.g. PP5, WID617, SP-1043"},
          "joint_id": {"type": "string", "description": "e.g. J07"},
          "pass_type": {"type": "string", "enum": PASS_TYPES},
-         "has_defect": {"type": "boolean"},
-         "rt_result": {"type": "string", "enum": ["accept", "reject", "pending"]},
+         "has_defect": {"type": "boolean", "description": "true = NDT found indications in this pass"},
+         "defect": {"type": "string", "enum": DEFECTS, "description": "only passes with this NDT indication type"},
+         "rt_result": {"type": "string", "enum": RT_VALUES},
          "only_wps_violations": {"type": "boolean", "description": "Only passes that broke the WPS"},
          "since_days": {"type": "number", "description": "Only passes started within N days of the most recent pass"},
      }}},
@@ -47,26 +56,43 @@ TOOL_SPECS: list[dict] = [
          "spool_id": {"type": "string"},
      }}},
     {"name": "get_signals_summary",
-     "description": "Statistics (mean/std/min/max) of arc current, voltage, travel speed, wire feed, gas flow, heat "
-                    "input and interpass temperature for one pass, optionally within [t0, t1] seconds, compared with "
-                    "the WPS limits. Shows a mini chart.",
+     "description": "Statistics (mean/std/min/max) of the signals that exist for one pass - arc current and voltage "
+                    "(lead, and trail electrode for tandem processes: current2_a/voltage2_v/wfs2_mpm), travel speed, "
+                    "wire feed, gas flow (absent for flux-shielded SAW), heat input, interpass temperature - "
+                    "optionally within [t0, t1] seconds, compared with the WPS window. Shows a mini chart; `params` "
+                    "picks the plotted signals (e.g. ['current_a','current2_a'] to compare lead vs trail).",
      "input_schema": {"type": "object", "properties": {
-         "sequence": _SEQ, "t0": {"type": "number"}, "t1": {"type": "number"}}, "required": ["sequence"]}},
+         "sequence": _SEQ, "t0": {"type": "number"}, "t1": {"type": "number"},
+         "params": {"type": "array", "items": {"type": "string", "enum": SIGNALS}}}, "required": ["sequence"]}},
     {"name": "wps_check",
-     "description": "Check one pass against its WPS (Welding Procedure Specification): every out-of-limit interval "
-                    "with value vs limits, plus labelled defect windows and the RT result.",
+     "description": "Check one pass against its WPS window: every out-of-limit interval with value vs limits, the "
+                    "NDT indication windows and the NDT result. For the real datasets the window is the published "
+                    "nominal setting ±10 % (see wps_basis) - a demo assumption, not a qualified WPS.",
      "input_schema": {"type": "object", "properties": {"sequence": _SEQ}, "required": ["sequence"]}},
     {"name": "show_weld",
-     "description": "Jump the dashboard's weld replay (torch camera video + synced signal plots) to a pass and time. "
-                    "Use `event` (e.g. 'porosity', 'defect', 'violation') to jump to where that started.",
+     "description": "Jump the dashboard's weld replay (process-camera video or bead photo + synced signal plots + "
+                    "NDT strip) to a pass and time. Use `event` (e.g. 'porosity', 'defect', 'violation') to jump to "
+                    "where that started.",
      "input_schema": {"type": "object", "properties": {
          "sequence": _SEQ, "t": {"type": "number", "description": "seconds from arc start"},
          "event": {"type": "string"},
-         "view": {"type": "string", "enum": ["torch", "edge", "depth", "sim2real"]}}}},
+         "view": {"type": "string", "enum": ["torch", "edge", "depth", "photo", "sim2real"]}}}},
+    {"name": "show_photo",
+     "description": "Show the bead photo(s) of a pass in the replay panel (AIMEN SAW beads have photos; BAM layers "
+                    "have process video instead). Returns the photo list and the pass's NDT indications.",
+     "input_schema": {"type": "object", "properties": {"sequence": _SEQ}, "required": ["sequence"]}},
+    {"name": "ndt_summary",
+     "description": "NDT (RT radiography / UT ultrasonic) findings. With `sequence`: every indication of that pass "
+                    "(type, time window, x position mm, method) plus an honest check of whether the arc signals "
+                    "differ inside the indication windows vs the clean weld. With `coupon` (e.g. PP5): per-bead "
+                    "counts. With neither: every inspected pass with indications, by dataset.",
+     "input_schema": {"type": "object", "properties": {
+         "sequence": _SEQ, "coupon": {"type": "string", "description": "coupon / workpiece id, e.g. PP5"}}}},
     {"name": "assess_weld",
-     "description": "Run the Cosmos 3 Reasoner (vision-language world model) on a 5 s torch-camera clip with sensor "
-                    "context: returns verdict accept/reject/review, defects with confidence, root cause, WPS "
-                    "findings, recommended action and reasoning trace.",
+     "description": "Run the Cosmos 3 Reasoner (vision-language world model) on a 5 s process-camera clip, or on the "
+                    "bead photo for photo-only passes (AIMEN SAW), with sensor + NDT context: returns verdict "
+                    "accept/reject/review, defects with confidence, root cause, WPS findings, recommended action and "
+                    "reasoning trace.",
      "input_schema": {"type": "object", "properties": {
          "sequence": _SEQ, "clip_id": {"type": "string"},
          "t": {"type": "number", "description": "centre of the clip (s); default: first defect"}}}},
@@ -79,8 +105,9 @@ TOOL_SPECS: list[dict] = [
          "change": {"type": "string", "description": "the process change, free text or template key"},
          "t": {"type": "number"}}, "required": ["change"]}},
     {"name": "sim2real",
-     "description": "Cosmos 3 Transfer: turn the simulator's control video (edge or depth) of a pass into photoreal "
-                    "weld footage for training data. Long-running background job.",
+     "description": "Cosmos 3 Transfer: turn a pass's control video (simulator edge/depth, or the Canny edge video "
+                    "of a real BAM process-camera clip) into new photoreal weld footage for training data, same "
+                    "timing so labels carry over. Long-running background job.",
      "input_schema": {"type": "object", "properties": {
          "sequence": _SEQ, "kind": {"type": "string", "enum": ["edge", "depth"]}, "t": {"type": "number"}},
          "required": ["sequence"]}},
@@ -114,11 +141,16 @@ def validate_input(name: str, args: Any) -> str | None:
             continue
         typ = p.get("type")
         ok = {"string": isinstance(v, str), "number": isinstance(v, (int, float)) and not isinstance(v, bool),
-              "integer": isinstance(v, int) and not isinstance(v, bool), "boolean": isinstance(v, bool)}.get(typ, True)
+              "integer": isinstance(v, int) and not isinstance(v, bool), "boolean": isinstance(v, bool),
+              "array": isinstance(v, list)}.get(typ, True)
         if not ok:
             return f"field '{k}' must be {typ}"
         if "enum" in p and v not in p["enum"]:
             return f"field '{k}' must be one of {p['enum']}"
+        if typ == "array" and "enum" in p.get("items", {}):
+            bad = [x for x in v if x not in p["items"]["enum"]]
+            if bad:
+                return f"field '{k}' items must be in {p['items']['enum']}"
     return None
 
 
@@ -141,7 +173,7 @@ class Toolbox:
             return {"result": {"error": f"{type(e).__name__}: {e}"}, "cards": [], "ui": [], "is_error": True}
         out.setdefault("cards", [])
         out.setdefault("ui", [])
-        return out
+        return clean_json(out)
 
     # ------------------------------------------------------------ helpers
     def resolve_sequence(self, ref: str | None, ctx: dict | None = None, prefer_defect: bool = True) -> str:
@@ -161,8 +193,12 @@ class Toolbox:
             cand = [r for r in cand if (r["spool_id"] or "").upper() == m["spool"]]
         if m.get("joint"):
             cand = [r for r in cand if (r["joint_id"] or "").upper() == m["joint"]]
-        if m.get("pass_no"):
+        if m.get("pass_no") is not None:
             cand = [r for r in cand if r["pass_no"] == m["pass_no"]]
+            if not m.get("spool") and ctx.get("last_sequence") in names:
+                # "layer 3" / "bead 2" alone: prefer the coupon the conversation is on
+                cur = next(r for r in rows if r["sequence_name"] == ctx["last_sequence"])
+                cand = [r for r in cand if r["spool_id"] == cur["spool_id"]] or cand
         if m.get("pass_type"):
             cand = [r for r in cand if (r["pass_type"] or "").lower() == m["pass_type"]]
         if m.get("process"):
@@ -177,7 +213,8 @@ class Toolbox:
             else:
                 raise LookupError(f"no weld pass matches '{ref}'")
         if prefer_defect:
-            cand = sorted(cand, key=lambda r: (not r["has_defect"], r["rt_result"] != "reject", r["pass_no"]))
+            cand = sorted(cand, key=lambda r: (not r["has_defect"], r["rt_result"] not in BAD_RT, r["synthetic"],
+                                               r["pass_no"]))
         return cand[0]["sequence_name"]
 
     def _seq(self, sequence: str | None, ctx: dict) -> str:
@@ -187,9 +224,10 @@ class Toolbox:
 
     # ------------------------------------------------------------ tools
     def t_list_passes(self, ctx, process=None, spool_id=None, joint_id=None, pass_type=None, has_defect=None,
-                      rt_result=None, only_wps_violations=False, since_days=None) -> dict:
+                      rt_result=None, only_wps_violations=False, since_days=None, source=None, defect=None) -> dict:
         rows = self.data.list_passes(process=process, spool_id=spool_id, joint_id=joint_id, pass_type=pass_type,
-                                     has_defect=has_defect, rt_result=rt_result, with_violations=True)
+                                     has_defect=has_defect, rt_result=rt_result, with_violations=True, source=source,
+                                     defect=defect)
         if since_days:
             dates = [_dt(r.get("started_at")) for r in self.data.all_passes()]
             dates = [d for d in dates if d]
@@ -199,19 +237,28 @@ class Toolbox:
         if only_wps_violations:
             rows = [r for r in rows if r.get("violation_count")]
         slim = [{"sequence": r["sequence_name"], "spool": r["spool_id"], "joint": r["joint_id"],
-                 "pass": f"P{r['pass_no']} {r['pass_type']}", "process": r["process"], "wps": r["wps_id"],
-                 "rt": r["rt_result"] or "pending", "defects": r["defect_types"],
+                 "pass": f"{r.get('pass_label') or 'P' + str(r['pass_no'])} {r['pass_type']}", "process": r["process"],
+                 "wps": r["wps_id"], "rt": r["rt_result"] or "pending", "defects": r["defect_types"],
+                 "defect_counts": r.get("defect_counts") or {}, "source": r.get("source_id"),
+                 "simulated": bool(r.get("synthetic")),
                  "wps_violations": r.get("violation_count", 0), "violated": r.get("violated_params", []),
                  "started": (r.get("started_at") or "")[:16].replace("T", " ")} for r in rows]
+        for x in slim:
+            x["ndt"] = ndt_text(x["rt"], x["defect_counts"])
         if len(slim) == 1:
             ctx["last_sequence"] = slim[0]["sequence"]
+        real = any(not x["simulated"] for x in slim)
         card = {"type": "table", "title": f"{len(slim)} weld passes", "row_action": "show_weld",
                 "columns": [{"key": "sequence", "label": "Pass"}, {"key": "process", "label": "Proc"},
-                            {"key": "rt", "label": "RT", "badge": True},
+                            {"key": "rt", "label": "NDT" if real else "RT", "badge": True, "text_key": "ndt"},
                             {"key": "wps_violations", "label": "WPS viol."},
                             {"key": "violated", "label": "Params"}, {"key": "defects", "label": "Defects"}],
                 "rows": slim[:40]}
-        return {"result": {"count": len(slim), "passes": slim[:40]}, "cards": [card]}
+        res = {"count": len(slim), "passes": slim[:40]}
+        bases = {self.data.get_meta(x["sequence"]).get("wps_basis") for x in slim[:40] if not x["simulated"]} - {None}
+        if bases:
+            res["wps_basis"] = sorted(bases)
+        return {"result": res, "cards": [card]}
 
     def t_find_anomalies(self, ctx, param=None, gt=None, lt=None, process=None, spool_id=None) -> dict:
         rows = self.data.list_passes(process=process, spool_id=spool_id)
@@ -228,7 +275,7 @@ class Toolbox:
                 raise LookupError("give gt or lt with param")
             for r in rows:
                 df = self.data.get_signals(r["sequence_name"])
-                if param not in df.columns:
+                if param not in df.columns or not df[param].notna().any():
                     continue
                 x = df[param].rolling(20, center=True, min_periods=1).median().values
                 t = df["t_s"].values
@@ -257,15 +304,17 @@ class Toolbox:
                 "rows": hits[:60]}
         return {"result": {"count": len(hits), "title": title, "hits": hits[:60]}, "cards": [card]}
 
-    def t_get_signals_summary(self, ctx, sequence, t0=None, t1=None) -> dict:
+    def t_get_signals_summary(self, ctx, sequence, t0=None, t1=None, params=None) -> dict:
         seq = self._seq(sequence, ctx)
-        df = self.data.get_signals(seq, t0, t1)
+        df_all = self.data.get_signals(seq, t0, t1)
+        steady = self.data.steady_mask(seq, df_all)
+        df = df_all[steady]                       # stats on the steady arc: start/stop transients excluded
         lim = self.data.wps_limits(seq)
         stats = {}
         for p in SIGNALS:
-            if p not in df.columns:
+            if p not in df.columns or not df[p].notna().any():
                 continue
-            s = df[p]
+            s = df[p].dropna()
             lo, hi = (lim.get(p) or [None, None])
             out = 0.0
             if lo is not None:
@@ -275,12 +324,22 @@ class Toolbox:
             stats[p] = {"mean": round(float(s.mean()), 3), "std": round(float(s.std()), 3),
                         "min": round(float(s.min()), 3), "max": round(float(s.max()), 3),
                         "wps": [lo, hi], "pct_out_of_wps": round(100 * out, 1), "unit": SIGNAL_INFO[p]["unit"]}
-        a = float(df["t_s"].iloc[0]) if len(df) else 0
-        b = float(df["t_s"].iloc[-1]) if len(df) else 0
+        a = float(df_all["t_s"].iloc[0]) if len(df_all) else 0
+        b = float(df_all["t_s"].iloc[-1]) if len(df_all) else 0
         flagged = [p for p, s in stats.items() if s["pct_out_of_wps"] > 0]
-        params = (flagged + [p for p in ("current_a", "voltage_v", "travel_speed_mmps", "gas_lpm") if p not in flagged])[:4]
-        return {"result": {"sequence": seq, "t0": round(a, 2), "t1": round(b, 2), "stats": stats},
-                "cards": [self.chart_card(seq, params, a, b, title=f"{seq} · {a:.1f}–{b:.1f}s")]}
+        if params:
+            params = [p for p in params if p in stats][:4]
+        else:
+            params = (flagged + [p for p in ("current_a", "current2_a", "voltage_v", "travel_speed_mmps", "gas_lpm")
+                                 if p not in flagged and p in stats])[:4]
+        res = {"sequence": seq, "t0": round(a, 2), "t1": round(b, 2), "stats": stats,
+               "stats_window": "steady arc (first 1 s after arc start and last 0.6 s excluded)",
+               "missing_signals": self.data.signal_notes(seq)}
+        if "current2_a" in stats:
+            res["lead_vs_trail"] = {p: {"lead": stats[p]["mean"], "trail": stats[TRAIL_OF[p]]["mean"],
+                                        "unit": stats[p]["unit"]}
+                                    for p in TRAIL_OF if p in stats and TRAIL_OF[p] in stats}
+        return {"result": res, "cards": [self.chart_card(seq, params, a, b, title=f"{seq} · {a:.1f}–{b:.1f}s")]}
 
     def t_wps_check(self, ctx, sequence) -> dict:
         seq = self._seq(sequence, ctx)
@@ -289,11 +348,16 @@ class Toolbox:
         wins = self.data.defect_windows(seq)
         dur = meta.get("duration_s") or 0
         bad_s = sum(v["t_end_s"] - v["t_start_s"] for v in viol)
+        full = self.data.get_meta(seq)
         res = {"sequence": seq, "wps_id": meta.get("wps_id"), "rt_result": meta.get("rt_result") or "pending",
                "violations": viol, "defect_windows": wins, "duration_s": dur,
                "compliant": not viol, "out_of_spec_seconds": round(bad_s, 2),
-               "wps_limits": self.data.wps_limits(seq)}
-        params = list(dict.fromkeys(v["param"] for v in viol))[:3] or ["current_a", "voltage_v", "gas_lpm"]
+               "wps_limits": self.data.wps_limits(seq), "source": meta.get("source_id")}
+        if full.get("wps_basis"):
+            res["wps_basis"] = full["wps_basis"]
+        avail = self.data.available_signals(seq)
+        params = list(dict.fromkeys(v["param"] for v in viol))[:3] or [p for p in ("current_a", "voltage_v", "gas_lpm",
+                                                                                    "travel_speed_mmps") if p in avail][:3]
         cards = [{"type": "table", "title": f"{seq} vs {meta.get('wps_id')}: "
                                             f"{'COMPLIANT' if not viol else f'{len(viol)} violations'}",
                   "row_action": "show_weld", "time_key": "t_start_s", "default_sequence": seq,
@@ -325,6 +389,85 @@ class Toolbox:
                 "title": f"Replay → {seq} @ {t:.1f}s" + (f" ({event})" if event else "")}
         return {"result": {"ok": True, "sequence": seq, "t": round(t, 2)}, "cards": [card], "ui": [action]}
 
+    def t_show_photo(self, ctx, sequence) -> dict:
+        seq = self._seq(sequence, ctx)
+        photos = self.data.photos(seq)
+        src = self.data.source(seq)
+        ndt = self.data.ndt(seq)
+        if not photos:
+            media = self.data.media(seq)
+            hint = " It has a process-camera video instead (use show_weld)." if media.get("torch") else ""
+            return {"result": {"sequence": seq, "photos": [], "error": f"no bead photo for {seq}.{hint}"},
+                    "cards": [], "ui": [{"action": "show_weld", "sequence": seq, "t": 0}] if media.get("torch") else []}
+        cap = self.data.media(seq).get("photo_caption")
+        card = {"type": "photo", "sequence": seq, "title": f"Bead photo · {seq}", "caption": cap,
+                "photos": [{"name": p["name"], "url": p["url"]} for p in photos], "source": src,
+                "indications": ndt.get("indications") or [], "rt_result": (self.data.get_pass(seq) or {}).get("rt_result")}
+        return {"result": {"sequence": seq, "photos": [p["name"] for p in photos], "caption": cap,
+                           "ndt_indications": len(ndt.get("indications") or []),
+                           "note": "Photo shows the bead surface only; RT/UT indications are internal and may not be "
+                                   "visible on the surface."},
+                "cards": [card], "ui": [{"action": "show_weld", "sequence": seq, "view": "photo"}]}
+
+    def t_ndt_summary(self, ctx, sequence=None, coupon=None) -> dict:
+        if sequence:
+            seq = self._seq(sequence, ctx)
+            row = self.data.get_pass(seq) or {}
+            ndt = self.data.ndt(seq)
+            chk = self.data.indication_check(seq)
+            inds = ndt.get("indications") or []
+            res = {"sequence": seq, "source": row.get("source_id"), "rt_result": row.get("rt_result"),
+                   "inspected": bool(ndt.get("inspected")), "methods": ndt.get("methods") or [],
+                   "report_files": ndt.get("report_files") or [], "counts": row.get("defect_counts") or {},
+                   "indications": inds[:60], "signal_check": chk}
+            if ndt.get("simulated"):
+                res["note"] = "simulator ground truth (synthetic), not a real NDT report"
+            cards = []
+            if inds:
+                rows = [{"sequence": seq, "type": i.get("type"), "t_start": i.get("t_start"), "t_end": i.get("t_end"),
+                         "x_mm": (f"{i['x_start_mm']}–{i['x_end_mm']}" if i.get("x_start_mm") is not None else None),
+                         "method": i.get("method") or "/".join(ndt.get("methods") or [])} for i in inds]
+                cards.append({"type": "table", "title": f"{seq}: {ndt_text(row.get('rt_result'), row.get('defect_counts') or {})}",
+                              "row_action": "show_weld", "time_key": "t_start", "default_sequence": seq,
+                              "columns": [{"key": "type", "label": "Indication"}, {"key": "t_start", "label": "From s"},
+                                          {"key": "t_end", "label": "To s"}, {"key": "x_mm", "label": "x mm"},
+                                          {"key": "method", "label": "NDT"}], "rows": rows[:60]})
+            if chk and chk["params"]:
+                ps = [p for p in ("current_a", "voltage_v", "current2_a", "voltage2_v") if p in chk["params"]][:4]
+                dur = float(row.get("duration_s") or 0) or None
+                cards.append(self.chart_card(seq, ps, 0, dur, title=f"{seq} · arc signals vs NDT windows"))
+                cards[-1]["signal_check"] = chk
+            return {"result": res, "cards": cards}
+        rows = self.data.list_passes(spool_id=coupon) if coupon else self.data.list_passes()
+        if coupon and not rows:
+            raise LookupError(f"no coupon/workpiece '{coupon}'")
+        sim = [r for r in rows if r.get("synthetic")]
+        if sim and len(sim) < len(rows):      # real data loaded: simulator passes never count as real NDT results
+            rows = [r for r in rows if not r.get("synthetic")]
+        insp = [r for r in rows if r.get("ndt_inspected")]
+        hits = [r for r in insp if r["has_defect"]]
+        by_type: dict[str, int] = {}
+        for r in hits:
+            for k, v in (r.get("defect_counts") or {}).items():
+                by_type[k] = by_type.get(k, 0) + v
+        table_rows = [{"sequence": r["sequence_name"], "coupon": r["spool_id"], "pass": r.get("pass_label"),
+                       "rt": r["rt_result"], "ndt": ndt_text(r["rt_result"], r.get("defect_counts") or {}),
+                       "source": r.get("source_short"), "simulated": r.get("synthetic")}
+                      for r in (insp if coupon else hits)]
+        res = {"coupon": coupon, "passes": len(rows), "inspected": len(insp), "with_indications": len(hits),
+               "not_inspected": len(rows) - len(insp), "indications_by_type": by_type,
+               "simulated_excluded": len(sim) if sim and len(sim) < len(rows) + len(sim) else 0,
+               "rows": table_rows[:60],
+               "materials": sorted({r.get("material") for r in hits if r.get("material")})}
+        if table_rows:
+            ctx["last_sequence"] = table_rows[0]["sequence"]
+        title = (f"{coupon}: {len(hits)} of {len(insp)} inspected passes with NDT indications" if coupon
+                 else f"{len(hits)} of {len(insp)} inspected passes have NDT indications")
+        card = {"type": "table", "title": title, "row_action": "show_weld",
+                "columns": [{"key": "sequence", "label": "Pass"}, {"key": "source", "label": "Dataset"},
+                            {"key": "rt", "label": "NDT", "badge": True, "text_key": "ndt"}], "rows": table_rows[:60]}
+        return {"result": res, "cards": [card]}
+
     def t_assess_weld(self, ctx, sequence=None, clip_id=None, t=None) -> dict:
         seq = None if clip_id else self._seq(sequence, ctx)
         res = self.wm.assess(seq, clip_id, t)
@@ -332,10 +475,12 @@ class Toolbox:
         card = {"type": "verdict", **res}
         slim = {k: res.get(k) for k in ("verdict", "defects", "root_cause", "wps_findings", "recommended_action",
                                          "source", "latency_s", "sequence_name", "clip_id", "t0_s", "t1_s",
-                                         "rt_result", "note")}
+                                         "rt_result", "note", "input_kind", "ndt_indications", "signal_check")}
         slim["reasoning"] = (res.get("reasoning") or "")[:1500]
-        return {"result": slim, "cards": [card],
-                "ui": [{"action": "show_weld", "sequence": res["sequence_name"], "t": res["t0_s"], "soft": True}]}
+        ui = {"action": "show_weld", "sequence": res["sequence_name"], "t": res["t0_s"], "soft": True}
+        if res.get("input_kind") == "photo":
+            ui["view"] = "photo"
+        return {"result": slim, "cards": [card], "ui": [ui]}
 
     def t_what_if(self, ctx, change, sequence=None, clip_id=None, t=None) -> dict:
         seq = None if clip_id else self._seq(sequence, ctx)
@@ -387,12 +532,13 @@ class Toolbox:
                 "cards": [{"type": "clips", "title": f"{len(scored)} clips match “{text}”", "rows": rows}]}
 
     # ------------------------------------------------------------ cards
-    def chart_card(self, seq: str, params: list[str], t0: float, t1: float, title: str = "") -> dict:
+    def chart_card(self, seq: str, params: list[str], t0: float | None, t1: float | None, title: str = "") -> dict:
         df = self.data.get_signals(seq, t0, t1)
         step = max(1, len(df) // 300)
         d = df.iloc[::step]
         lim = self.data.wps_limits(seq)
-        series = {p: [round(float(x), 3) for x in d[p].values] for p in params if p in d.columns}
+        series = {p: [round(float(x), 3) if x == x else None for x in d[p].values] for p in params
+                  if p in d.columns and d[p].notna().any()}
         return {"type": "chart", "title": title, "sequence": seq, "t": [round(float(x), 2) for x in d["t_s"].values],
                 "series": series, "wps": {p: lim.get(p) for p in series},
                 "info": {p: SIGNAL_INFO[p] for p in series},
@@ -415,7 +561,7 @@ class Toolbox:
         return None
 
     def _find_seq_with_event(self, event: str) -> str | None:
-        for r in sorted(self.data.all_passes(), key=lambda r: r["rt_result"] != "reject"):
+        for r in sorted(self.data.all_passes(), key=lambda r: (r["rt_result"] not in BAD_RT, r.get("synthetic", False))):
             if self._event_time(r["sequence_name"], event) is not None:
                 return r["sequence_name"]
         return None
@@ -431,9 +577,40 @@ def _dt(s: str | None):
         return None
 
 
+def ndt_text(rt: str | None, counts: dict | None) -> str:
+    """Badge text: 'NDT: porosity ×14', 'NDT clear', 'not inspected', legacy 'RT reject'."""
+    counts = counts or {}
+    if rt == "indications":
+        if not counts:
+            return "NDT: indications"
+        top = sorted(counts.items(), key=lambda kv: -kv[1])
+        return "NDT: " + ", ".join(f"{k.replace('_', ' ')} ×{v}" for k, v in top[:2]) + (" …" if len(top) > 2 else "")
+    if rt == "no_indications":
+        return "NDT clear"
+    if rt == "not_inspected":
+        return "not inspected"
+    if rt in ("accept", "reject"):
+        return f"RT {rt}"
+    return "RT pending"
+
+
 def _parse_ref(text: str) -> dict:
     out: dict = {}
     t = text.upper().replace("_", " ")
+    m = re.search(r"\b(PP)[- ]?(\d{1,2})\b", t)            # AIMEN coupon PP3..PP7
+    if m:
+        out["spool"] = f"PP{int(m.group(2))}"
+    m = m or re.search(r"\bWID[- ]?(\d{3})\b", t)          # BAM workpiece WID617
+    if m and "spool" not in out:
+        out["spool"] = f"WID{m.group(1)}"
+    m = re.search(r"\b(?:B|BEAD)[- ]?0*(\d{1,2})\b", t) or re.search(r"\b(?:L|LAYER)[- ]?0*(\d{1,2})\b", t)
+    if m:
+        out["pass_no"] = int(m.group(1))
+    if out:
+        for pr in PROCESSES:
+            if re.search(rf"\b{pr}\b", t):
+                out["process"] = pr
+        return out
     m = re.search(r"\b(SP|V)[- ]?(\d{3,5})", t)
     if m:
         out["spool"] = f"{m.group(1)}-{m.group(2)}"

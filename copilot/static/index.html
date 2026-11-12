@@ -19,7 +19,7 @@
       <circle cx="21" cy="24" r="12" fill="url(#g)"/><path d="M17 3h8l-1.5 15h-5z" fill="#c98a52"/>
     </svg>
     <div><div class="brand-name">WeldWorld <span>Weld Copilot</span></div>
-      <div class="brand-sub">Physical AI for ASME pipe-spool &amp; vessel fabrication</div></div>
+      <div class="brand-sub" id="brandSub">Physical AI for ASME pipe-spool &amp; vessel fabrication</div></div>
   </div>
   <nav class="tabs" role="tablist">
     <button class="tab-btn active" data-tab="copilot" role="tab">Copilot</button>
@@ -28,6 +28,8 @@
     <button class="tab-btn" data-tab="flow" role="tab">How it works</button>
   </nav>
   <div class="mode-wrap">
+    <button class="credits-btn" id="creditsBtn" title="Datasets, authors and licences (CC BY 4.0 attribution)">
+      <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 15h-2v-6h2zm0-8h-2V7h2z"/></svg>Data &amp; credits</button>
     <div class="mode-badge" id="modeBadge" title="Cosmos 3 backend"><span class="dot"></span><span id="modeText">—</span></div>
     <div class="llm-badge" id="llmBadge" title="Chat LLM backend">—</div>
   </div>
@@ -41,29 +43,26 @@
       <div class="panel-head"><h2>Shop floor</h2><span class="sub" id="floorSource">Cell 2 · robotic</span></div>
       <div class="kpis" id="floorKpis"></div>
       <div class="filters">
-        <div class="seg full" id="fProcess">
+        <div class="seg full" id="fSource">
           <button data-v="" class="on">All</button>
         </div>
         <div class="frow">
-          <select id="fSpool" aria-label="Spool"><option value="">All spools</option></select>
-          <select id="fRt" aria-label="RT result"><option value="">RT: any</option><option value="reject">RT reject</option>
-            <option value="accept">RT accept</option><option value="pending">RT pending</option></select>
+          <select id="fDefectType" aria-label="Defect type"><option value="">All defect types</option></select>
+          <select id="fRt" aria-label="NDT / RT result"><option value="">NDT: any</option></select>
         </div>
-        <label class="toggle"><input type="checkbox" id="fDefect"><span></span>Defects / WPS breaks only</label>
+        <label class="toggle"><input type="checkbox" id="fDefect"><span></span><span class="tl" id="fDefectLbl">Defects / WPS breaks only</span></label>
       </div>
       <div class="pass-list" id="passList"></div>
     </aside>
 
     <section class="panel replay">
       <div class="replay-head">
-        <div>
+        <div class="rh-main">
           <div class="seq-title" id="seqTitle">Select a weld pass</div>
           <div class="chips" id="seqChips"></div>
+          <div class="prov" id="seqProv"></div>
         </div>
-        <div class="view-toggle" id="viewToggle">
-          <button data-view="torch" class="on">Torch cam</button><button data-view="edge">Edge</button>
-          <button data-view="depth">Depth</button><button data-view="sim2real" class="s2r">Sim → Real</button>
-        </div>
+        <div class="view-toggle" id="viewToggle"></div>
       </div>
       <div class="stage" id="stage">
         <div class="stage-videos" id="stageVideos">
@@ -73,6 +72,13 @@
         <div class="s2r-empty hidden" id="s2rEmpty">
           <div class="s2r-msg"><b>No photoreal render for this pass yet.</b><br>Cosmos 3 Transfer turns the simulator's edge video into photoreal weld footage.</div>
           <button class="btn primary" id="s2rGo">Generate with Cosmos 3 Transfer</button>
+        </div>
+        <div class="photo-view hidden" id="photoView">
+          <div class="pv-main" id="pvMain"><img id="pvImg" alt="Bead photo" draggable="false"></div>
+          <div class="pv-cap" id="pvCap"></div>
+          <div class="pv-ndt" id="pvNdt"></div>
+          <div class="pv-tools"><button id="pvOut" title="Zoom out">−</button><span id="pvZoom">fit</span><button id="pvIn" title="Zoom in">+</button><button id="pvFit" title="Fit">⤢</button></div>
+          <div class="pv-thumbs" id="pvThumbs"></div>
         </div>
         <div class="hud" id="hud"></div>
         <div class="stage-empty" id="stageEmpty">No torch-camera video for this pass</div>
@@ -158,6 +164,15 @@
     <div class="flow-scroll" id="flow"><div class="placeholder">Loading…</div></div>
   </section>
 </main>
+
+<div class="modal hidden" id="creditsModal" role="dialog" aria-modal="true" aria-labelledby="creditsTitle">
+  <div class="modal-card">
+    <div class="modal-h"><h2 id="creditsTitle">Data sources &amp; credits</h2>
+      <button class="icon-btn small" id="creditsClose" title="Close (Esc)">✕</button></div>
+    <div class="modal-b" id="creditsBody"><div class="placeholder">Loading…</div></div>
+  </div>
+</div>
+<div class="tip hidden" id="tip"></div>
 
 <script src="/static/vendor/uPlot.iife.min.js"></script>
 <script src="/static/vendor/marked.min.js"></script>

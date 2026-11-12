@@ -20,21 +20,55 @@ import numpy as np
 import pandas as pd
 
 from . import config
+from .provenance import public as public_source
+from .provenance import source_of
 
 log = logging.getLogger("copilot.data")
 
-SIGNALS = ["current_a", "voltage_v", "travel_speed_mmps", "wfs_mpm", "gas_lpm", "heat_input_kj_mm", "interpass_c"]
+# Lead electrode (or the only wire) first; `*2_*` = trail electrode of a tandem process (optional).
+SIGNALS = ["current_a", "current2_a", "voltage_v", "voltage2_v", "travel_speed_mmps", "wfs_mpm", "wfs2_mpm",
+           "gas_lpm", "heat_input_kj_mm", "interpass_c"]
+TRAIL_OF = {"current_a": "current2_a", "voltage_v": "voltage2_v", "wfs_mpm": "wfs2_mpm"}
 WPS_WINDOW_S = {"travel_speed_mmps": 1.0, "heat_input_kj_mm": 1.0, "interpass_c": 1.0}
 WPS_DEADBAND = 0.01
+WPS_KEYS = ("current_a", "voltage_v", "travel_speed_mmps", "wfs_mpm", "gas_lpm", "heat_input_kj_mm",
+            "current2_a", "voltage2_v", "wfs2_mpm")
 SIGNAL_INFO = {
     "current_a": {"label": "Current", "unit": "A"},
+    "current2_a": {"label": "Current (trail)", "unit": "A"},
     "voltage_v": {"label": "Voltage", "unit": "V"},
+    "voltage2_v": {"label": "Voltage (trail)", "unit": "V"},
     "travel_speed_mmps": {"label": "Travel speed", "unit": "mm/s"},
     "wfs_mpm": {"label": "Wire feed", "unit": "m/min"},
+    "wfs2_mpm": {"label": "Wire feed (trail)", "unit": "m/min"},
     "gas_lpm": {"label": "Shielding gas", "unit": "L/min"},
     "heat_input_kj_mm": {"label": "Heat input", "unit": "kJ/mm"},
     "interpass_c": {"label": "Interpass temp", "unit": "°C"},
 }
+GOOD_RT = {"accept", "no_indications"}
+BAD_RT = {"reject", "indications"}
+
+
+def _finite(v) -> bool:
+    try:
+        return v is not None and np.isfinite(float(v))
+    except (TypeError, ValueError):
+        return False
+
+
+def clean_json(v):
+    """NaN/inf -> None, numpy scalars -> python (Starlette's JSONResponse refuses NaN)."""
+    if isinstance(v, dict):
+        return {k: clean_json(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [clean_json(x) for x in v]
+    if isinstance(v, (np.floating, float)):
+        return float(v) if np.isfinite(v) else None
+    if isinstance(v, np.integer):
+        return int(v)
+    if isinstance(v, np.bool_):
+        return bool(v)
+    return v
 
 
 def _try_import(name: str):
@@ -61,14 +95,14 @@ def _wps_from_meta(meta: dict) -> dict:
         except ValueError:
             w = {}
     out: dict[str, list] = {}
-    for k in ("current_a", "voltage_v", "travel_speed_mmps", "wfs_mpm", "gas_lpm", "heat_input_kj_mm"):
+    for k in WPS_KEYS:
         v = w.get(k)
         if v is None and (f"{k}_min" in w or f"{k}_lo" in w):
             v = [w.get(f"{k}_min", w.get(f"{k}_lo")), w.get(f"{k}_max", w.get(f"{k}_hi"))]
         if isinstance(v, (list, tuple)) and len(v) == 2:
             out[k] = [float(v[0]), float(v[1])]
     mi = w.get("max_interpass_c")
-    if not out or mi is None:
+    if (not out or mi is None) and source_of(meta).get("synthetic"):
         try:
             from collect.schema import WPS_LIBRARY
             lib = WPS_LIBRARY.get(meta.get("wps_id", ""))
@@ -115,7 +149,33 @@ def _normalize_row(m: dict) -> dict:
         "defects": [d for d in defects if isinstance(d, dict)],
         "started_at": m.get("started_at") or m.get("start_time_utc"),
     }
+    src = source_of(m)
+    ndt = m.get("ndt") if isinstance(m.get("ndt"), dict) else {}
+    counts: dict[str, int] = {}
+    for d in row["defects"]:
+        if d.get("defect") and d.get("defect") != "none":
+            counts[d["defect"]] = counts.get(d["defect"], 0) + 1
+    row.update({
+        "source_id": src.get("id"), "source_short": src.get("short"), "synthetic": bool(src.get("synthetic")),
+        "license": src.get("license"), "doi": src.get("doi"),
+        "pass_label": _pass_label(src, row["pass_no"]),
+        "electrodes": int(m.get("electrodes") or 1),
+        "ndt_inspected": bool(ndt.get("inspected")) if ndt else row["rt_result"] in ("accept", "reject", "indications", "no_indications"),
+        "ndt_methods": list(ndt.get("methods") or ([] if ndt else (["RT"] if row["rt_result"] in ("accept", "reject") else []))),
+        "defect_counts": counts,
+        "thickness_mm": m.get("thickness_mm") or m.get("wall_mm"),
+        "n_photos": len(m.get("photos") or []),
+    })
+    if not row["defects"] and ndt.get("indications"):
+        row["defect_counts"] = {}
+        for i in ndt["indications"]:
+            row["defect_counts"][i.get("type")] = row["defect_counts"].get(i.get("type"), 0) + 1
     return row
+
+
+def _pass_label(src: dict, n: int) -> str:
+    w = src.get("pass_word") or "P"
+    return f"{w} {n}" if len(w) > 1 else f"{w}{n}"
 
 
 class DataLayer:
@@ -134,6 +194,9 @@ class DataLayer:
         return config.generated_dir()
 
     def pass_dir(self, seq: str) -> Path:
+        for g in config.generated_dirs():
+            if (g / seq).is_dir():
+                return g / seq
         return self.gen / seq
 
     def refresh(self) -> None:
@@ -144,16 +207,19 @@ class DataLayer:
 
     # -------------------------------------------------------------- passes
     def _local_rows(self) -> list[dict]:
-        rows = []
-        if not self.gen.exists():
-            return rows
-        for d in sorted(self.gen.iterdir()):
-            mp = d / "meta.json"
-            if mp.exists():
+        rows, seen = [], set()
+        for g in config.generated_dirs():
+            if not g.exists():
+                continue
+            for d in sorted(g.iterdir()):
+                mp = d / "meta.json"
+                if d.name in seen or not mp.exists():
+                    continue
                 try:
-                    m = json.loads(mp.read_text())
+                    m = json.loads(mp.read_text(encoding="utf-8"))
                     m.setdefault("sequence_name", d.name)
                     rows.append(m)
+                    seen.add(d.name)
                 except ValueError:
                     continue
         return rows
@@ -173,28 +239,46 @@ class DataLayer:
         if raw is None:
             raw = self._local_rows()
             self.last_source = "local"
+        if self.last_source != "local":
+            # mosaico rows are flattened: the pass dir's meta.json is the source of truth for provenance/NDT/media
+            merged = []
+            for r in raw:
+                seq = r.get("sequence_name") or r.get("name")
+                mp = self.pass_dir(seq) / "meta.json" if seq else None
+                if mp is not None and mp.exists():
+                    try:
+                        r = {**r, **json.loads(mp.read_text(encoding="utf-8"))}
+                    except ValueError:
+                        pass
+                merged.append(r)
+            raw = merged
         rows = [_normalize_row(r) for r in raw if (r.get("sequence_name") or r.get("name"))]
-        # enrich with local meta where mosaico rows are flattened (keeps defects/timing)
         for r in rows:
-            mp = self.pass_dir(r["sequence_name"]) / "meta.json"
-            if not r["defects"] and mp.exists() and self.last_source != "local":
-                try:
-                    r.update({k: v for k, v in _normalize_row(json.loads(mp.read_text())).items() if v})
-                except ValueError:
-                    pass
-            r["has_video"] = (self.pass_dir(r["sequence_name"]) / "torch_cam.mp4").exists()
-        rows.sort(key=lambda r: (r["spool_id"] or "", r["joint_id"] or "", r["pass_no"]))
+            d = self.pass_dir(r["sequence_name"])
+            r["has_video"] = (d / "torch_cam.mp4").exists()
+            r["has_photo"] = bool(r.get("n_photos")) and any((d / p).exists() for p in self._photo_rel(r["sequence_name"]))
+        rows.sort(key=lambda r: (r["synthetic"], r["source_id"] or "", r["spool_id"] or "", r["joint_id"] or "",
+                                 r["pass_no"]))
         with self._lock:
             self._rows_cache = (time.time(), rows)
         return rows
 
     def list_passes(self, process: str | None = None, spool_id: str | None = None, joint_id: str | None = None,
                     pass_type: str | None = None, has_defect: bool | None = None, rt_result: str | None = None,
-                    wps_id: str | None = None, with_violations: bool = False, **_: Any) -> list[dict]:
+                    wps_id: str | None = None, with_violations: bool = False, source: str | None = None,
+                    defect: str | None = None, **_: Any) -> list[dict]:
         rows = self.all_passes()
 
+        def norm(x):
+            return "".join(ch for ch in str(x or "").upper() if ch.isalnum()).replace("TANDEM", "T")
+
         def ok(r):
-            if process and (r["process"] or "").upper() != process.upper():
+            if process and norm(r["process"]) != norm(process):
+                return False
+            if source and source.lower() not in ((r["source_id"] or "").lower(), "simulated" if r["synthetic"] else "-"):
+                if not (source.lower() in ("sim", "synthetic") and r["synthetic"]):
+                    return False
+            if defect and defect not in (r.get("defect_counts") or {}) and defect not in r["defect_types"]:
                 return False
             if spool_id and (r["spool_id"] or "").upper() != spool_id.upper():
                 return False
@@ -205,7 +289,11 @@ class DataLayer:
             if has_defect is not None and r["has_defect"] != has_defect:
                 return False
             if rt_result and (r["rt_result"] or "pending") != rt_result.lower():
-                return False
+                rr = rt_result.lower()
+                # "reject"/"accept" also match the real-data equivalents
+                if not ((rr == "reject" and r["rt_result"] == "indications")
+                        or (rr == "accept" and r["rt_result"] == "no_indications")):
+                    return False
             if wps_id and r["wps_id"] != wps_id:
                 return False
             return True
@@ -218,6 +306,36 @@ class DataLayer:
                 r["violated_params"] = sorted({x["param"] for x in v})
         return out
 
+    def data_mode(self) -> dict:
+        """What the loaded passes are: real datasets, simulator, or both (drives wording across the app)."""
+        rows = self.all_passes()
+        real = [r for r in rows if not r.get("synthetic")]
+        ids = list(dict.fromkeys(r["source_id"] for r in real))
+        return {"real": bool(real), "simulated": sum(1 for r in rows if r.get("synthetic")), "real_passes": len(real),
+                "sources": ids, "short": [next(r["source_short"] for r in real if r["source_id"] == i) for i in ids],
+                "choice": config.dataset_choice(), "fixture": config.fixtures_mode() == "real"}
+
+    def sources_summary(self) -> dict:
+        """Every dataset behind the loaded passes, with full CC BY attribution and what we use from it."""
+        from .provenance import DATASETS, SIMULATOR
+        rows = self.all_passes()
+        out = []
+        ids = list(dict.fromkeys([r["source_id"] for r in rows] + list(DATASETS)))
+        for sid in ids:
+            rs = [r for r in rows if r["source_id"] == sid]
+            meta = self.get_meta(rs[0]["sequence_name"]) if rs else {"source": {"id": sid, **DATASETS.get(sid, SIMULATOR)}}
+            src = public_source(source_of(meta))
+            src.update({"loaded": bool(rs), "passes": len(rs), "coupons": sorted({r["spool_id"] for r in rs if r["spool_id"]}),
+                        "inspected": sum(1 for r in rs if r.get("ndt_inspected")),
+                        "with_indications": sum(1 for r in rs if r["rt_result"] == "indications"),
+                        "indications": sum(sum((r.get("defect_counts") or {}).values()) for r in rs if not r.get("synthetic")),
+                        "videos": sum(1 for r in rs if r.get("has_video")), "photos": sum(r.get("n_photos") or 0 for r in rs),
+                        "fixture": any(self.get_meta(r["sequence_name"]).get("fixture") for r in rs[:3])})
+            if src["synthetic"] and not rs:
+                continue
+            out.append(src)
+        return {"sources": out, "mode": self.data_mode()}
+
     def get_pass(self, seq: str) -> dict | None:
         for r in self.all_passes():
             if r["sequence_name"] == seq:
@@ -227,9 +345,41 @@ class DataLayer:
     def get_meta(self, seq: str) -> dict:
         mp = self.pass_dir(seq) / "meta.json"
         if mp.exists():
-            return json.loads(mp.read_text())
+            return json.loads(mp.read_text(encoding="utf-8"))
         r = self.get_pass(seq)
         return dict(r) if r else {}
+
+    def source(self, seq: str) -> dict:
+        return public_source(source_of(self.get_meta(seq)))
+
+    def _photo_rel(self, seq: str) -> list[str]:
+        try:
+            return [str(p) for p in (self.get_meta(seq).get("photos") or []) if isinstance(p, str)]
+        except (OSError, ValueError):
+            return []
+
+    def photos(self, seq: str) -> list[dict]:
+        d = self.pass_dir(seq)
+        out = []
+        for rel in self._photo_rel(seq):
+            p = (d / rel).resolve()
+            if p.is_file() and p.is_relative_to(d.resolve()):
+                out.append({"name": p.name, "path": str(p), "url": file_url(p)})
+        return out
+
+    def ndt(self, seq: str) -> dict:
+        """NDT block for a pass: meta.ndt (real data) or synthesised from the RT result (simulator)."""
+        meta = self.get_meta(seq)
+        n = meta.get("ndt") if isinstance(meta.get("ndt"), dict) else None
+        wins = self.defect_windows(seq)
+        if n is None:
+            rt = meta.get("rt_result")
+            return {"methods": ["RT"] if rt in ("accept", "reject") else [], "inspected": rt in ("accept", "reject"),
+                    "report_files": [], "simulated": True,
+                    "indications": [{"type": w["defect"], "t_start": w["t_start"], "t_end": w["t_end"]} for w in wins]}
+        n = dict(n)
+        n.setdefault("indications", [{"type": w["defect"], "t_start": w["t_start"], "t_end": w["t_end"]} for w in wins])
+        return n
 
     def wps_limits(self, seq: str) -> dict:
         return _wps_from_meta(self.get_meta(seq))
@@ -240,13 +390,20 @@ class DataLayer:
         arc = pd.read_parquet(d / "arc.parquet").sort_values("t_ns")
         t0 = int(self.get_meta(seq).get("t0_ns") or arc["t_ns"].iloc[0])
         base = arc.copy()
-        for name in ("travel", "thermal"):
+        base["t_ns"] = base["t_ns"].astype("int64")
+        for name in ("travel", "thermal"):        # optional streams (real datasets may not have them)
             p = d / f"{name}.parquet"
             if p.exists():
-                other = pd.read_parquet(p).sort_values("t_ns")
-                base = pd.merge_asof(base, other, on="t_ns", direction="nearest")
-        if "interpass_c" in base:
-            base["interpass_c"] = base["interpass_c"].interpolate(limit_direction="both")
+                try:
+                    other = pd.read_parquet(p).sort_values("t_ns")
+                    other["t_ns"] = other["t_ns"].astype("int64")
+                    other = other[[c for c in other.columns if c == "t_ns" or c not in base.columns]]
+                    base = pd.merge_asof(base, other, on="t_ns", direction="nearest")
+                except Exception as e:  # noqa: BLE001 - a broken optional stream must not hide the arc data
+                    log.warning("%s: skipping %s.parquet (%s)", seq, name, e)
+        for c in ("interpass_c", "temp_left_c", "temp_right_c"):
+            if c in base:
+                base[c] = base[c].interpolate(limit_direction="both")
         base.insert(0, "t_s", (base["t_ns"] - t0) / 1e9)
         return base
 
@@ -266,7 +423,12 @@ class DataLayer:
             if df is None:
                 df = self._local_signals(seq)
             if "heat_input_kj_mm" not in df.columns and {"current_a", "voltage_v", "travel_speed_mmps"} <= set(df.columns):
-                df["heat_input_kj_mm"] = 0.8 * df["voltage_v"] * df["current_a"] / (1000 * df["travel_speed_mmps"].clip(lower=0.05))
+                meta = self.get_meta(seq)
+                eff = 1.0 if str(meta.get("process", "")).upper() == "SAW" else 0.8
+                power = df["voltage_v"] * df["current_a"]
+                if {"current2_a", "voltage2_v"} <= set(df.columns):
+                    power = power + (df["voltage2_v"] * df["current2_a"]).fillna(0)
+                df["heat_input_kj_mm"] = eff * power / (1000 * df["travel_speed_mmps"].clip(lower=0.05))
             with self._lock:
                 self._sig_cache[seq] = df
         if t0_s is not None:
@@ -274,6 +436,95 @@ class DataLayer:
         if t1_s is not None:
             df = df[df["t_s"] <= t1_s]
         return df
+
+    def steady_mask(self, seq: str, df: pd.DataFrame) -> np.ndarray:
+        """Arc-on samples without the start transient (1 s) and the arc-stop crater fill (0.6 s)."""
+        ev = self.events(seq)
+        t = df["t_s"].values
+        starts = [e["t_s"] for e in ev if e.get("type") == "arc_start"]
+        stops = [e["t_s"] for e in ev if e.get("type") == "arc_stop"]
+        a = (min(starts) if starts else (t[0] if len(t) else 0)) + 1.0
+        b = (max(stops) if stops else (t[-1] if len(t) else 0)) - 0.6
+        m = (t >= a) & (t <= b)
+        return m if m.sum() >= 10 else np.ones(len(t), bool)
+
+    def available_signals(self, seq: str) -> list[str]:
+        """Signals that exist for this pass and carry data (SAW has an all-NaN gas column, BAM L1 no trail)."""
+        df = self.get_signals(seq)
+        return [p for p in SIGNALS if p in df.columns and df[p].notna().any()]
+
+    def signal_notes(self, seq: str) -> dict:
+        meta = self.get_meta(seq)
+        avail = set(self.available_signals(seq))
+        notes = {}
+        if "gas_lpm" not in avail:
+            notes["gas_lpm"] = ("flux-shielded (SAW): no shielding-gas channel" if str(meta.get("process", "")).upper() == "SAW"
+                                else "no shielding-gas signal recorded for this pass")
+        if "travel_speed_mmps" not in avail:
+            notes["travel_speed_mmps"] = "no travel-speed stream in this dataset"
+        if "interpass_c" not in avail:
+            notes["interpass_c"] = "no temperature stream in this dataset"
+        return notes
+
+    # -------------------------------------------------------------- NDT vs signals
+    def indication_check(self, seq: str, params: tuple = ("current_a", "voltage_v", "current2_a", "voltage2_v")) -> dict | None:
+        """Do the arc signals look different inside the NDT indication windows than in the clean weld?
+
+        For each signal: mean inside all windows vs the clean arc-on weld, and how many windows have a mean outside
+        the 1–99 % band of same-length rolling means of the clean weld. `signature` is true only when ≥30 % of the
+        windows fall outside that band - otherwise the honest answer is "no electrical signature"."""
+        wins = [w for w in self.defect_windows(seq) if w["t_end"] >= w["t_start"]]
+        if not wins:
+            return None
+        df = self.get_signals(seq)
+        t = df["t_s"].values
+        if len(t) < 20:
+            return None
+        hz = 1.0 / max(float(np.median(np.diff(t[:500]))), 1e-4)
+        ev = self.events(seq)
+        starts = [e["t_s"] for e in ev if e.get("type") == "arc_start"]
+        stops = [e["t_s"] for e in ev if e.get("type") == "arc_stop"]
+        on = (t >= (min(starts) if starts else t[0]) + 1.0) & (t <= (max(stops) if stops else t[-1]) - 0.6)
+        inside = np.zeros(len(t), bool)
+        for w in wins:
+            inside |= (t >= w["t_start"]) & (t <= w["t_end"])
+        L = max(int(round(np.median([w["t_end"] - w["t_start"] for w in wins]) * hz)), 1)
+        out: dict[str, Any] = {"n_windows": len(wins), "window_s": round(L / hz, 3), "params": {}}
+        for p in params:
+            if p not in df.columns or not df[p].notna().any():
+                continue
+            x = df[p].values.astype(float)
+            clean = on & ~inside & np.isfinite(x)
+            if clean.sum() < max(3 * L, 20):
+                continue
+            roll = pd.Series(np.where(clean, x, np.nan)).rolling(L, min_periods=L).mean().dropna().values
+            lo, hi = (np.percentile(roll, [1, 99]) if len(roll) > 20 else (np.nan, np.nan))
+            flagged, means = 0, []
+            for w in wins:
+                m = (t >= w["t_start"]) & (t <= w["t_end"]) & np.isfinite(x)
+                if not m.any():
+                    j = int(np.clip(np.searchsorted(t, w["t_start"]), 0, len(t) - 1))
+                    m = np.zeros(len(t), bool)
+                    m[j] = np.isfinite(x[j])
+                    if not m.any():
+                        continue
+                mu = float(x[m].mean())
+                means.append(mu)
+                flagged += int(np.isfinite(lo) and (mu < lo or mu > hi))
+            if not means:
+                continue
+            mean_in = float(np.nanmean(x[inside & np.isfinite(x)])) if (inside & np.isfinite(x)).any() else float(np.mean(means))
+            mean_out = float(x[clean].mean())
+            out["params"][p] = {
+                "mean_in": round(mean_in, 2), "mean_clean": round(mean_out, 2), "std_clean": round(float(x[clean].std()), 2),
+                "delta_pct": round(100 * (mean_in - mean_out) / mean_out, 2) if mean_out else None,
+                "band_1_99": [round(float(lo), 2), round(float(hi), 2)] if np.isfinite(lo) else None,
+                "windows_outside_band": flagged, "windows_checked": len(means),
+                "signature": bool(len(means) and flagged / len(means) >= 0.3),
+                "unit": SIGNAL_INFO.get(p, {}).get("unit", ""),
+            }
+        out["signature"] = any(v["signature"] for v in out["params"].values())
+        return out
 
     # -------------------------------------------------------------- WPS
     def _local_violations(self, seq: str) -> list[dict]:
@@ -288,7 +539,7 @@ class DataLayer:
         t_off = (max(stops) if stops else float(df["t_s"].iloc[-1])) - 0.6
         out = []
         for param, (lo, hi) in lim.items():
-            if param not in df.columns:
+            if param not in df.columns or not df[param].notna().any():
                 continue
             # monitor value: 0.5 s moving average (1 s for travel/heat input to remove torch weave),
             # 1 % deadband on the limit, ignore the first second after arc start (start transient)
@@ -363,9 +614,22 @@ class DataLayer:
 
     def defect_windows(self, seq: str) -> list[dict]:
         meta = self.get_meta(seq)
-        wins = [{"defect": d.get("defect"), "t_start": float(d.get("t_start", 0)), "t_end": float(d.get("t_end", 0)),
-                 "severity": d.get("severity")} for d in (meta.get("defects") or []) if isinstance(d, dict)]
+        wins = [{"defect": d.get("defect"), "t_start": float(d.get("t_start") or 0), "t_end": float(d.get("t_end") or d.get("t_start") or 0),
+                 "severity": d.get("severity")} for d in (meta.get("defects") or [])
+                if isinstance(d, dict) and d.get("defect") not in (None, "none") and _finite(d.get("t_start"))]
+        if not wins and isinstance(meta.get("ndt"), dict):
+            for i in meta["ndt"].get("indications") or []:
+                if _finite(i.get("t_start")):
+                    wins.append({"defect": i.get("type"), "t_start": float(i["t_start"]),
+                                 "t_end": float(i.get("t_end") if _finite(i.get("t_end")) else i["t_start"]), "severity": None})
         if wins:
+            ndt = meta.get("ndt") if isinstance(meta.get("ndt"), dict) else {}
+            ind = ndt.get("indications") or []
+            for k, w in enumerate(wins):     # carry NDT positions (mm) for hover / photo cross-reference
+                if k < len(ind) and isinstance(ind[k], dict):
+                    for f in ("x_start_mm", "x_end_mm", "method"):
+                        if ind[k].get(f) is not None:
+                            w[f] = ind[k][f]
             return wins
         on: dict[str, dict] = {}
         for e in self.events(seq):
@@ -378,10 +642,31 @@ class DataLayer:
 
     def media(self, seq: str) -> dict:
         d = self.pass_dir(seq)
-        out = {}
-        for key, rel in (("torch", "torch_cam.mp4"), ("edge", "control/edge.mp4"), ("depth", "control/depth.mp4")):
+        meta = self.get_meta(seq)
+        src = source_of(meta)
+        out: dict[str, Any] = {}
+        vinfo = meta.get("video") if isinstance(meta.get("video"), dict) else {}
+        vfile = vinfo.get("file") or "torch_cam.mp4"
+        for key, rel in (("torch", vfile), ("edge", "control/edge.mp4"), ("depth", "control/depth.mp4")):
             if (d / rel).exists():
                 out[key] = file_url(d / rel)
+        if "torch" in out:
+            real = not src.get("synthetic")
+            out["video"] = {"kind": vinfo.get("kind") or ("real_process_camera" if real else "simulated_torch_camera"),
+                            "fps": vinfo.get("fps"), "t_offset_s": float(vinfo.get("t_offset_s") or 0.0),
+                            "real": real,
+                            "caption": (src.get("video_caption") or f"Real process camera — {src.get('short')}, {src.get('license')}")
+                            if real else "Torch cam · SIMULATOR"}
+        ph = self.photos(seq)
+        if ph:
+            out["photos"] = [{"name": p["name"], "url": p["url"]} for p in ph]
+            out["photo_caption"] = src.get("photo_caption") or f"Bead photo — {src.get('short')}, {src.get('license')}"
+        if meta.get("fixture"):   # copilot.fixtures_real stand-ins must never pass for the real dataset
+            for k in ("photo_caption",):
+                if k in out:
+                    out[k] += " · FIXTURE placeholder"
+            if out.get("video", {}).get("real"):
+                out["video"]["caption"] += " · FIXTURE stand-in"
         return out
 
     # -------------------------------------------------------------- curated
@@ -431,7 +716,7 @@ class DataLayer:
         return {"total": len(rows), "kept": len(kept), "rejected": len(rows) - len(kept),
                 "by_defect": by_defect, "reject_reasons": reasons,
                 "sequences": len({r.get("sequence_name") for r in rows}),
-                "rt_reject_clips": sum(1 for r in kept if r.get("rt_result") == "reject")}
+                "rt_reject_clips": sum(1 for r in kept if r.get("rt_result") in BAD_RT)}
 
 
 def _defect_list(r: dict) -> list[str]:

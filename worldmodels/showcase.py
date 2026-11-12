@@ -10,6 +10,7 @@ to MP4 paths; ``get_showcase(id)`` / ``list_showcase()`` read it back.
 from __future__ import annotations
 
 import json
+import re
 import time
 import traceback
 from pathlib import Path
@@ -50,7 +51,8 @@ def resolve_clip_path(row: dict, manifest: str | Path) -> Optional[Path]:
         p = Path(uri)
         cands += [p] if p.is_absolute() else [mdir / p, Path.cwd() / p, data_dir().parent / p]
     if row.get("clip_id"):
-        cands += [mdir / "clips" / f"{row['clip_id']}.mp4", data_dir() / "curated" / "clips" / f"{row['clip_id']}.mp4"]
+        for ext in ((".jpg", ".png") if row.get("media_type") == "image" else (".mp4",)):
+            cands += [mdir / "clips" / f"{row['clip_id']}{ext}", data_dir() / "curated" / "clips" / f"{row['clip_id']}{ext}"]
     for c in cands:
         if c.exists():
             return c.resolve()
@@ -60,12 +62,16 @@ def resolve_clip_path(row: dict, manifest: str | Path) -> Optional[Path]:
 def context_for_row(row: dict) -> dict:
     """Prefer the full export sidecar (signal stats + WPS) when present, else the manifest row."""
     cid = row.get("clip_id")
-    for cand in (data_dir() / "export" / f"{cid}.json", data_dir() / "curated" / "clips" / f"{cid}.json"):
+    base = re.sub(r"_p\d+$", "", str(cid)) if cid else cid    # photo items: <window clip_id>_p<k>
+    for cand in (data_dir() / "export" / f"{cid}.json", data_dir() / "export" / f"{base}.json",
+                 data_dir() / "curated" / "clips" / f"{cid}.json"):
         if cid and cand.exists():
             try:
                 ctx = json.loads(cand.read_text())
                 if row.get("caption") and "caption" not in ctx:
                     ctx["caption"] = row["caption"]
+                if row.get("media_type"):
+                    ctx["media_type"] = row["media_type"]
                 return ctx
             except Exception:
                 pass
@@ -82,11 +88,26 @@ def _row_defects(row: dict) -> set[str]:
     return out
 
 
+def _row_source(row: dict) -> dict:
+    src = row.get("source")
+    return src if isinstance(src, dict) else {}
+
+
+def _is_video_row(row: dict) -> bool:
+    return (row.get("media_type") or "video") == "video" and not str(row.get("clip_uri") or "").lower().endswith(
+        (".jpg", ".jpeg", ".png"))
+
+
 def pick_clip(rows: list[dict], spec: Optional[str], manifest: str | Path) -> Optional[tuple[dict, Path]]:
+    """Kept *video* row for ``spec``: ``auto`` (real process-camera clips first, e.g. BAM), ``auto:<defect>``
+    (a clip with that defect first) or ``auto@<source_id>`` / ``auto:<defect>@<source_id>``."""
     if not spec:
         return None
+    spec, _, want_src = spec.partition("@")
     want = spec.split(":", 1)[1] if spec.startswith("auto:") else None
-    kept = [r for r in rows if r.get("kept", True)]
+    kept = [r for r in rows if r.get("kept", True) and _is_video_row(r)]
+    kept.sort(key=lambda r: (bool(want_src) and _row_source(r).get("id") != want_src,
+                             bool(_row_source(r).get("synthetic", not _row_source(r)))))
     ordered = ([r for r in kept if want in _row_defects(r)] if want else []) + kept
     for r in ordered:
         p = resolve_clip_path(r, manifest)
@@ -95,29 +116,41 @@ def pick_clip(rows: list[dict], spec: Optional[str], manifest: str | Path) -> Op
     return None
 
 
-def pick_pass_dir(spec: Optional[str], rows: list[dict]) -> Optional[Path]:
+def _pass_meta(d: Path) -> dict:
+    try:
+        return json.loads((d / "meta.json").read_text())
+    except Exception:
+        return {}
+
+
+def pick_pass_dir(spec: Optional[str], rows: list[dict], kinds: Optional[list[str]] = None) -> Optional[Path]:
+    """Pass dir with control videos for Transfer: an explicit sequence name, ``auto`` (real passes with
+    the needed ``control/<kind>.mp4`` first, e.g. BAM edge maps of the real video) or ``auto:<defect>``."""
     gen = data_dir() / "generated"
     if not gen.exists():
         return None
-    dirs = sorted(d for d in gen.iterdir() if (d / "control").is_dir())
+    kinds = kinds or ["edge"]
+    dirs = sorted(d for d in gen.iterdir() if (d / "control").is_dir()
+                  and all((d / "control" / f"{k}.mp4").exists() for k in kinds))
     if spec and not spec.startswith("auto"):
         d = gen / spec
         return d if d.exists() else None
+    real_first = sorted(dirs, key=lambda d: bool((_pass_meta(d).get("source") or {"synthetic": True}).get("synthetic", False)
+                                               if isinstance(_pass_meta(d).get("source"), dict) else True))
     want = spec.split(":", 1)[1] if spec and spec.startswith("auto:") else None
     if want:
-        for d in dirs:
-            try:
-                meta = json.loads((d / "meta.json").read_text())
-                if any((x.get("defect") if isinstance(x, dict) else x) == want for x in meta.get("defects", [])):
-                    return d
-            except Exception:
-                continue
-    return dirs[0] if dirs else None
+        for d in real_first:
+            meta = _pass_meta(d)
+            if any((x.get("defect") if isinstance(x, dict) else x) == want for x in meta.get("defects", [])):
+                return d
+    return real_first[0] if real_first else None
 
 
 def warm_cache(manifest: Optional[str | Path] = None, *, showcase: Optional[str | Path] = None, limit: Optional[int] = None,
                do_assess: bool = True, do_explain: bool = True, do_generate: bool = True, do_transfer: bool = True,
-               preset: str = "showcase", dry_run: bool = False, log: Callable[[str], None] = print) -> dict:
+               preset: str = "showcase", dry_run: bool = False, log: Callable[[str], None] = print,
+               photo_limit: Optional[int] = None) -> dict:
+    """``limit`` caps the kept video clips assessed, ``photo_limit`` the kept photo items (default: limit)."""
     from . import generate, reason, transfer
     from .video import extract_frame
 
@@ -131,9 +164,15 @@ def warm_cache(manifest: Optional[str | Path] = None, *, showcase: Optional[str 
     elif manifest:
         report["errors"].append(f"manifest not found: {manifest}")
         log(f"! manifest not found: {manifest}")
-    kept = [r for r in rows if r.get("kept", True)]
+    kept_all = [r for r in rows if r.get("kept", True)]
+    vids = [r for r in kept_all if _is_video_row(r)]
+    photos = [r for r in kept_all if not _is_video_row(r)]
+    plim = limit if photo_limit is None else photo_limit
     if limit:
-        kept = kept[:limit]
+        vids = vids[:limit]
+    if plim is not None and plim >= 0 and (photo_limit is not None or limit):
+        photos = photos[:plim]
+    kept = vids + photos
 
     if do_assess:
         for i, row in enumerate(kept):
@@ -148,6 +187,7 @@ def warm_cache(manifest: Optional[str | Path] = None, *, showcase: Optional[str 
                 ctx = context_for_row(row)
                 res = reason.assess_clip(str(clip), ctx)
                 rec = {"clip_id": row.get("clip_id"), "path": str(clip), "verdict": res["verdict"],
+                       "media_type": "video" if _is_video_row(row) else "image",
                        "source": res["source"], "latency_ms": res["latency_ms"], "cache_key": res.get("cache_key")}
                 if do_explain:
                     ex = reason.explain_signals_meta(ctx)
@@ -164,6 +204,7 @@ def warm_cache(manifest: Optional[str | Path] = None, *, showcase: Optional[str 
         for job in sc.get("what_if", []):
             jid = job["id"]
             image = video = None
+            scene = dict(job.get("scene") or {})
             cond = job.get("condition", "none")
             if cond in ("image", "video"):
                 picked = pick_clip(rows, job.get("source_clip") or "auto", manifest) if rows else None
@@ -171,10 +212,13 @@ def warm_cache(manifest: Optional[str | Path] = None, *, showcase: Optional[str 
                     log(f"- {jid}: no source clip available, falling back to text2video")
                 else:
                     row, clip = picked
+                    if not _row_source(row).get("synthetic", True):
+                        scene.setdefault("source", _row_source(row).get("id"))
                     if cond == "image":
-                        image = str(frames_dir / f"{row.get('clip_id', clip.stem)}_first.png")
+                        which = job.get("frame", "middle" if not _row_source(row).get("synthetic", True) else "first")
+                        image = str(frames_dir / f"{row.get('clip_id', clip.stem)}_{which}.png")
                         if not dry_run:
-                            extract_frame(clip, image, "first")
+                            extract_frame(clip, image, which)
                     else:
                         video = str(clip)
             if dry_run:
@@ -183,7 +227,7 @@ def warm_cache(manifest: Optional[str | Path] = None, *, showcase: Optional[str 
             try:
                 meta = generate.what_if_meta(job["prompt"], image_path=image, video_path=video,
                                              seconds=job.get("seconds", 5), seed=job.get("seed", 0), preset=preset,
-                                             scene=job.get("scene"), match_text=f"{jid} {job.get('title', '')}")
+                                             scene=scene or None, match_text=f"{jid} {job.get('title', '')}")
                 report["what_if"][jid] = {"title": job.get("title"), "path": meta["path"], "source": meta["source"],
                                           "latency_ms": meta["latency_ms"], "image": image, "video": video,
                                           "prompt": job["prompt"], "placeholder": meta.get("placeholder", False)}
@@ -195,7 +239,7 @@ def warm_cache(manifest: Optional[str | Path] = None, *, showcase: Optional[str 
     if do_transfer:
         for job in sc.get("transfer", []):
             jid = job["id"]
-            pdir = pick_pass_dir(job.get("source_pass", "auto"), rows)
+            pdir = pick_pass_dir(job.get("source_pass", "auto"), rows, job.get("kinds", ["edge"]))
             controls = transfer.controls_for_pass(pdir) if pdir else {}
             controls = {k: v for k, v in controls.items() if k in job.get("kinds", ["edge"])}
             if len(controls) != len(job.get("kinds", ["edge"])):
@@ -206,11 +250,16 @@ def warm_cache(manifest: Optional[str | Path] = None, *, showcase: Optional[str 
                 log(f"[dry-run] transfer {jid} {controls}")
                 continue
             try:
+                scene = dict(job.get("scene") or {})
+                psrc = _pass_meta(pdir).get("source") if pdir else None
+                if isinstance(psrc, dict) and not psrc.get("synthetic", False):
+                    scene.setdefault("source", psrc.get("id"))
                 meta = transfer.sim2real_meta(controls, job["prompt"], job.get("seed", 0), preset=preset,
-                                              scene=job.get("scene"))
+                                              scene=scene or None)
                 report["transfer"][jid] = {"title": job.get("title"), "path": meta["path"], "source": meta["source"],
                                            "latency_ms": meta["latency_ms"], "controls": controls,
                                            "sequence_name": pdir.name if pdir else None,
+                                           "data_source": scene.get("source"),
                                            "placeholder": meta.get("placeholder", False)}
                 log(f"transfer {jid}: {meta['source']} {meta['latency_ms']} ms -> {meta['path']}")
             except Exception as e:

@@ -97,10 +97,20 @@ def build_flow(data, agent, cos: dict, mos: dict) -> dict[str, Any]:
     tr = cache.get("sim2real", {"real": 0, "fallback": 0})
     placeholders = cache.get("placeholders", {}).get("fallback", 0)
 
-    # one weld, end to end: prefer an RT-rejected porosity pass (the demo's lead story)
-    ex_pass = next((r for r in passes if "porosity" in (r.get("defect_types") or []) and r.get("rt_result") == "reject"),
-                   next((r for r in passes if r.get("has_defect") and r.get("rt_result") == "reject"),
-                        next((r for r in passes if r.get("has_defect")), None)))
+    dm = data.data_mode()
+    real_rows = [r for r in passes if not r.get("synthetic")]
+    finding = _ndt_signal_finding(data, real_rows) if dm["real"] else None
+
+    # one weld, end to end: real data -> the real pass with the most NDT indications (photo preferred);
+    # simulator -> an RT-rejected porosity pass (the original demo story)
+    ex_pass = None
+    if dm["real"]:
+        ind = [r for r in real_rows if r.get("rt_result") == "indications"]
+        ex_pass = max(ind, key=lambda r: (sum((r.get("defect_counts") or {}).values()), bool(r.get("has_photo"))),
+                      default=None)
+    ex_pass = ex_pass or next((r for r in passes if "porosity" in (r.get("defect_types") or []) and r.get("rt_result") == "reject"),
+                              next((r for r in passes if r.get("has_defect") and r.get("rt_result") == "reject"),
+                                   next((r for r in passes if r.get("has_defect")), None)))
     example = None
     if ex_pass:
         seq = ex_pass["sequence_name"]
@@ -124,9 +134,33 @@ def build_flow(data, agent, cos: dict, mos: dict) -> dict[str, Any]:
             "verdict": verdict.get("verdict") if verdict else None,
             "verdict_source": verdict.get("source") if verdict else None,
             "verdict_real": _is_real(verdict.get("source", "")) if verdict else False,
+            "real": not ex_pass.get("synthetic"), "source": ex_pass.get("source_short"),
+            "counts": ex_pass.get("defect_counts") or {}, "pass_label": ex_pass.get("pass_label"),
+            "coupon": ex_pass.get("spool_id"), "has_photo": bool(ex_pass.get("has_photo")),
+            "has_video": bool(ex_pass.get("has_video")),
         }
+        if example["real"]:
+            try:
+                chk = data.indication_check(seq)
+            except Exception:  # noqa: BLE001
+                chk = None
+            if chk and chk.get("params"):
+                c = chk["params"].get("current_a") or next(iter(chk["params"].values()))
+                example["signal_check"] = {"signature": chk["signature"], "n_windows": chk["n_windows"],
+                                           "mean_in": c["mean_in"], "mean_clean": c["mean_clean"], "unit": c["unit"],
+                                           "outside": c["windows_outside_band"]}
 
+    srcs = [x for x in data.sources_summary()["sources"] if x.get("loaded") and not x.get("synthetic")]
     return {
+        "data": dm, "sources": srcs, "finding": finding,
+        "real": {"passes": len(real_rows), "inspected": sum(1 for r in real_rows if r.get("ndt_inspected")),
+                 "with_indications": sum(1 for r in real_rows if r.get("rt_result") == "indications"),
+                 "indications": sum(sum((r.get("defect_counts") or {}).values()) for r in real_rows),
+                 "not_inspected": sum(1 for r in real_rows if not r.get("ndt_inspected")),
+                 "photos": sum(r.get("n_photos") or 0 for r in real_rows),
+                 "videos": sum(1 for r in real_rows if r.get("has_video")),
+                 "coupons": sorted({r.get("spool_id") for r in real_rows if r.get("spool_id")}),
+                 "simulated": dm["simulated"], "fixture": dm.get("fixture")},
         "collect": {"passes": len(passes), "defect_passes": sum(1 for r in passes if r.get("has_defect")),
                     "rt_reject": sum(1 for r in passes if r.get("rt_result") == "reject"),
                     "spools": sorted({r.get("spool_id") for r in passes if r.get("spool_id")}),
@@ -145,3 +179,31 @@ def build_flow(data, agent, cos: dict, mos: dict) -> dict[str, Any]:
         "copilot": {"llm": agent.label, "backend": agent.name},
         "example": example,
     }
+
+
+def _ndt_signal_finding(data, rows: list[dict]) -> dict | None:
+    """Across every real pass with NDT indications: did the arc signals change inside the indication windows?"""
+    checked, with_sig, windows, best = 0, 0, 0, None
+    for r in rows:
+        if r.get("rt_result") != "indications":
+            continue
+        try:
+            chk = data.indication_check(r["sequence_name"])
+        except Exception:  # noqa: BLE001
+            continue
+        if not chk or not chk.get("params"):
+            continue
+        checked += 1
+        windows += chk["n_windows"]
+        with_sig += int(bool(chk["signature"]))
+        if best is None or chk["n_windows"] > best[1]["n_windows"]:
+            best = (r, chk)
+    if not checked:
+        return None
+    r, chk = best
+    c = chk["params"].get("current_a") or next(iter(chk["params"].values()))
+    return {"passes_checked": checked, "passes_with_signature": with_sig, "windows": windows,
+            "example": {"sequence": r["sequence_name"], "counts": r.get("defect_counts") or {},
+                        "n_windows": chk["n_windows"], "param": "current_a" if "current_a" in chk["params"] else None,
+                        "mean_in": c["mean_in"], "mean_clean": c["mean_clean"], "unit": c["unit"],
+                        "outside": c["windows_outside_band"]}}

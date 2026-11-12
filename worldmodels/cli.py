@@ -1,6 +1,7 @@
 """Command line for the Cosmos 3 clients.
 
     python -m worldmodels.cli assess clip.mp4 --context clip.json
+    python -m worldmodels.cli assess data/curated/clips/PP5_B02_SAW_t0146.jpg --context data/export/PP5_B02_SAW_t0146.json
     python -m worldmodels.cli explain --context clip.json
     python -m worldmodels.cli chat "Why did J07 fail RT?" --video clip.mp4
     python -m worldmodels.cli whatif --prompt "travel speed drops 20%" --image frame.png --preset live
@@ -112,10 +113,13 @@ def cmd_anomaly(args) -> int:
 def cmd_warm(args) -> int:
     from .showcase import warm_cache
 
-    rep = warm_cache(args.manifest, showcase=args.showcase, limit=args.limit, do_assess=not args.skip_assess,
+    rep = warm_cache(args.manifest, showcase=args.showcase, limit=args.limit, photo_limit=args.photo_limit,
+                     do_assess=not args.skip_assess,
                      do_explain=not args.skip_explain, do_generate=not args.skip_generate,
                      do_transfer=not args.skip_transfer, preset=args.preset, dry_run=args.dry_run)
-    summary = {"assessed": len(rep["assess"]), "what_if": len(rep["what_if"]), "transfer": len(rep["transfer"]),
+    summary = {"assessed": len(rep["assess"]),
+               "assessed_photos": sum(1 for a in rep["assess"] if a.get("media_type") == "image"),
+               "what_if": len(rep["what_if"]), "transfer": len(rep["transfer"]),
                "errors": rep["errors"], "elapsed_s": rep.get("elapsed_s"), "report": rep.get("report_path"),
                "sources": sorted({a["source"] for a in rep["assess"]} | {v["source"] for v in rep["what_if"].values()}
                                  | {v["source"] for v in rep["transfer"].values()})}
@@ -143,8 +147,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--backend", choices=["auto", "local", "nim", "replay"], help="override COSMOS_BACKEND")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("assess", help="weld QA verdict for one clip (Cosmos3 Reasoner)")
-    p.add_argument("video")
+    p = sub.add_parser("assess", help="weld QA verdict for one clip or photo (Cosmos3 Reasoner)")
+    p.add_argument("video", help="clip .mp4 or photo .jpg/.png")
     p.add_argument("--context", help="export sidecar / manifest row JSON (default: <video>.json if present)")
     p.add_argument("--full", action="store_true", help="include raw model output")
     p.set_defaults(fn=cmd_assess)
@@ -198,7 +202,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("warm-cache", help="run Reasoner on kept clips + showcase generations (populates replay)")
     p.add_argument("--manifest", default="data/curated/manifest.jsonl")
     p.add_argument("--showcase", help="showcase spec (default configs/cosmos/showcase.json)")
-    p.add_argument("--limit", type=int)
+    p.add_argument("--limit", type=int, help="max kept video clips to assess")
+    p.add_argument("--photo-limit", type=int, help="max kept photo items to assess (default: --limit)")
     p.add_argument("--preset", default="showcase", choices=["smoke", "live", "showcase"])
     p.add_argument("--skip-assess", action="store_true")
     p.add_argument("--skip-explain", action="store_true")

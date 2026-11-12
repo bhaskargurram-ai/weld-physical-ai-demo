@@ -1,17 +1,17 @@
 {
-  "_comment": "Showcase generations pre-computed by `python -m worldmodels.cli warm-cache` on the GPU pod before the customer meeting. Replay mode serves them by id (worldmodels.showcase) and as nearest-prompt matches for live-typed what-if questions. condition: none = text2video, image = first frame of source_clip (image2video), video = continue source_clip (video2video). source_clip: auto = first kept curated clip, auto:<defect> = first kept clip with that defect. The what-if ids/prompts mirror copilot/models.py CHANGE_TEMPLATES so live copilot requests replay as exact-prompt (or nearest-prompt) cache hits.",
+  "_comment": "Showcase generations pre-computed by `python -m worldmodels.cli warm-cache` on the GPU pod before the customer meeting. Replay mode serves them by id (worldmodels.showcase) and as nearest-prompt matches for live-typed what-if questions. condition: none = text2video, image = a frame (frame: first|middle|last, default middle for real clips) of source_clip (image2video), video = continue source_clip (video2video). source_clip: auto = first kept curated VIDEO clip, real process-camera clips (BAM tandem GMAW) before simulator clips; auto:<defect> = one with that defect first; append @<source_id> to prefer a dataset. Transfer source_pass: auto = first pass dir with control/<kind>.mp4 for every kind, real passes first (BAM: Canny edges of the real video). scene.source (set automatically from the picked clip / pass) switches the prompt wrapper to the real setup. The what-if ids/prompts mirror copilot/models.py CHANGE_TEMPLATES so live copilot requests replay as exact-prompt (or nearest-prompt) cache hits.",
   "what_if": [
     {
-      "id": "baseline-fcaw-fill",
-      "title": "Baseline: FCAW fill pass inside the WPS window",
-      "prompt": "Steady FCAW fill pass with stable arc, consistent ripple spacing and a smooth, flat bead that wets evenly into both bevel faces",
+      "id": "baseline-tgmaw-fill",
+      "title": "Baseline: tandem GMAW fill layer inside the nominal window (real BAM frame)",
+      "prompt": "Steady tandem GMAW fill layer with two stable arcs feeding one weld pool, consistent ripple spacing and a smooth bead that wets evenly into both groove faces",
       "scene": {
-        "process": "FCAW",
+        "process": "GMAW",
         "pass_type": "fill",
         "defect": null
       },
       "condition": "image",
-      "source_clip": "auto",
+      "source_clip": "auto@bam_tgmaw",
       "seconds": 5,
       "seed": 0
     },
@@ -20,12 +20,12 @@
       "title": "What if travel speed drops 20%?",
       "prompt": "Robot travel speed is reduced by 20 percent. Heat input rises about 25 percent: the molten pool grows larger and hotter, the bead becomes wider and flatter with coarser ripples, and the glow trail behind the arc lengthens.",
       "scene": {
-        "process": "FCAW",
+        "process": "GMAW",
         "pass_type": "fill",
         "defect": null
       },
       "condition": "image",
-      "source_clip": "auto",
+      "source_clip": "auto@bam_tgmaw",
       "seconds": 5,
       "seed": 1
     },
@@ -34,12 +34,12 @@
       "title": "What if shielding gas flow collapses?",
       "prompt": "Shielding gas flow collapses from 21 to 5 litres per minute. The arc becomes erratic and flickers, spatter increases, the pool surface oxidises and gas pores appear in the trailing bead.",
       "scene": {
-        "process": "FCAW",
+        "process": "GMAW",
         "pass_type": "fill",
         "defect": "porosity"
       },
       "condition": "image",
-      "source_clip": "auto:porosity",
+      "source_clip": "auto:porosity@bam_tgmaw",
       "seconds": 5,
       "seed": 2
     },
@@ -48,12 +48,12 @@
       "title": "Porosity synthesis for detector training",
       "prompt": "Clusters of spherical gas pores (porosity) form in the solidifying weld bead behind the arc, with visible surface-breaking blowholes.",
       "scene": {
-        "process": "FCAW",
+        "process": "GMAW",
         "pass_type": "fill",
         "defect": "porosity"
       },
       "condition": "image",
-      "source_clip": "auto:porosity",
+      "source_clip": "auto:porosity@bam_tgmaw",
       "seconds": 5,
       "seed": 3
     },
@@ -62,12 +62,12 @@
       "title": "What if arc voltage runs 20% high?",
       "prompt": "Arc voltage increases by 20 percent: the arc lengthens and widens, and an undercut groove is melted into both toes of the bead without being filled.",
       "scene": {
-        "process": "FCAW",
+        "process": "GMAW",
         "pass_type": "fill",
         "defect": "undercut"
       },
       "condition": "image",
-      "source_clip": "auto:undercut",
+      "source_clip": "auto:undercut@bam_tgmaw",
       "seconds": 5,
       "seed": 4
     },
@@ -76,23 +76,25 @@
       "title": "What if interpass temperature exceeds the WPS maximum?",
       "prompt": "Interpass temperature exceeds the procedure maximum; a fine longitudinal centreline crack opens in the cooling bead.",
       "scene": {
-        "process": "FCAW",
+        "process": "GMAW",
         "pass_type": "fill",
         "defect": "crack"
       },
       "condition": "image",
-      "source_clip": "auto:crack",
+      "source_clip": "auto:crack@bam_tgmaw",
       "seconds": 5,
       "seed": 5
     },
     {
-      "id": "root-burn-through",
-      "title": "What if the GTAW root runs hot and slow?",
-      "prompt": "GTAW root pass with current 30 percent high and travel slowing down: the keyhole grows, the root melts through and molten metal sags out of the joint as burn-through",
+      "id": "saw-porosity",
+      "title": "Tandem SAW bead with porosity (AIMEN setup, text2video)",
+      "prompt": "Two-wire tandem submerged arc welding head travels along a thick plate butt joint under a granular flux blanket; behind it the slag cap lifts off and a few surface pores are visible in the cooled bead",
       "scene": {
-        "process": "GTAW",
-        "pass_type": "root",
-        "defect": "burn_through"
+        "process": "SAW",
+        "pass_type": "fill",
+        "defect": "porosity",
+        "source": "aimen_saw",
+        "view": "cell"
       },
       "condition": "none",
       "source_clip": null,
@@ -104,26 +106,26 @@
       "title": "Continue the inspected clip for 5 more seconds",
       "prompt": "The robot continues the same weld pass with the same parameters, the positioner keeps rotating the pipe and the bead keeps growing along the joint",
       "scene": {
-        "process": "FCAW",
+        "process": "GMAW",
         "pass_type": "fill",
         "defect": null
       },
       "condition": "video",
-      "source_clip": "auto",
+      "source_clip": "auto@bam_tgmaw",
       "seconds": 5,
       "seed": 7
     }
   ],
   "transfer": [
     {
-      "id": "sim2real-edge",
-      "title": "Sim -> real from the simulator edge map",
+      "id": "transfer-edge-bam",
+      "title": "Photoreal colour from the edge map of a real BAM process-camera video",
       "kinds": [
         "edge"
       ],
-      "prompt": "Photoreal torch-camera footage of a robotic FCAW fill pass on carbon-steel pipe, bright arc, glowing weld pool and grey solidified bead with fine ripples",
+      "prompt": "Photoreal colour footage of a robotic tandem GMAW fill layer in a deep V-groove of a thick steel plate: two bright arcs, one glowing weld pool and a grey solidified bead with fine ripples",
       "scene": {
-        "process": "FCAW",
+        "process": "GMAW",
         "pass_type": "fill",
         "defect": null
       },
@@ -131,35 +133,19 @@
       "seed": 0
     },
     {
-      "id": "sim2real-depth",
-      "title": "Sim -> real from the simulator depth map",
+      "id": "transfer-edge-bam-porosity",
+      "title": "Same real edge map, prompted with porosity (synthetic defect data)",
       "kinds": [
-        "depth"
+        "edge"
       ],
-      "prompt": "Photoreal torch-camera footage of a robotic FCAW fill pass on carbon-steel pipe, bright arc, glowing weld pool and grey solidified bead with fine ripples",
+      "prompt": "Photoreal colour footage of a robotic tandem GMAW fill layer where gas pockets erupt through the weld pool and leave surface porosity in the bead",
       "scene": {
-        "process": "FCAW",
-        "pass_type": "fill",
-        "defect": null
-      },
-      "source_pass": "auto",
-      "seed": 0
-    },
-    {
-      "id": "sim2real-edge-depth-porosity",
-      "title": "Sim -> real, edge + depth, porosity pass",
-      "kinds": [
-        "edge",
-        "depth"
-      ],
-      "prompt": "Photoreal torch-camera footage of a robotic FCAW pass where gas pockets erupt through the weld pool and leave surface porosity in the bead",
-      "scene": {
-        "process": "FCAW",
+        "process": "GMAW",
         "pass_type": "fill",
         "defect": "porosity"
       },
-      "source_pass": "auto:porosity",
-      "seed": 0
+      "source_pass": "auto",
+      "seed": 1
     }
   ]
 }

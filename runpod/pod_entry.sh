@@ -27,7 +27,16 @@ SERVE_HOURS="${SERVE_HOURS:-2}"
 CURATE_BACKEND="${CURATE_BACKEND:-curator-next}"
 COPILOT_PORT="${COPILOT_PORT:-7860}"
 export RUN_MODE CURATE_BACKEND COPILOT_PORT
-export DATA_DIR="${DATA_DIR:-${REPO_DIR}/data}"
+# Data (docs/REAL_DATA.md): real public datasets by default; on the pod all BAM workpieces.
+export DATA_SOURCE="${DATA_SOURCE:-real}"                       # real | sim | all
+export REAL_SOURCES="${REAL_SOURCES:-aimen_saw,bam_tgmaw}"
+export AIMEN_COUPONS="${AIMEN_COUPONS:-}"                       # empty = all coupons PP3-PP7
+export BAM_WIDS="${BAM_WIDS:-all}"                              # 615,617,630,631,632
+if [[ "$DATA_SOURCE" == sim ]]; then
+  export DATA_DIR="${DATA_DIR:-${REPO_DIR}/data}"
+else
+  export DATA_DIR="${DATA_DIR:-${REPO_DIR}/data/real}"
+fi
 
 say() { printf 'WELDWORLD %s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
@@ -103,19 +112,21 @@ fi
 stage infra bash runpod/start_all.sh infra || shutdown_pod infra-failed 11
 
 # ---------------------------------------------------------------- 3. collect -> Mosaico -> export -> curate
-stage pipeline "$PY" scripts/run_pipeline.py --data-dir "$DATA_DIR" --n-passes "${N_PASSES:-24}" \
-  --backend "$CURATE_BACKEND" --skip warm-cache --keep-going
+say "data source=${DATA_SOURCE} sources=${REAL_SOURCES} aimen_coupons=${AIMEN_COUPONS:-all} bam_wids=${BAM_WIDS} dir=${DATA_DIR}"
+stage pipeline "$PY" scripts/run_pipeline.py --data-source "$DATA_SOURCE" --data-dir "$DATA_DIR" \
+  --real-sources "$REAL_SOURCES" --aimen-coupons "$AIMEN_COUPONS" --bam-wids "$BAM_WIDS" \
+  --n-passes "${N_PASSES:-24}" --backend "$CURATE_BACKEND" --skip warm-cache --keep-going
 if [[ ! -s "${DATA_DIR}/curated/manifest.jsonl" && "$CURATE_BACKEND" != lite ]]; then
   say "curation with ${CURATE_BACKEND} produced no manifest -> retrying with lite"
   # a successful fallback recovers the run: the earlier pipeline rc should not fail it
-  stage curate-lite "$PY" scripts/run_pipeline.py --data-dir "$DATA_DIR" --only curate --backend lite \
+  stage curate-lite "$PY" scripts/run_pipeline.py --data-source "$DATA_SOURCE" --data-dir "$DATA_DIR" --only curate --backend lite \
     && STATUS=0 && say "recovered: curated with lite (Cosmos Curator failed, see above)"
 fi
 
 # ---------------------------------------------------------------- 4. Cosmos 3 servers + warm cache
 if stage models bash runpod/start_all.sh models --wait; then
-  stage warm-cache "$PY" scripts/run_pipeline.py --data-dir "$DATA_DIR" --only warm-cache \
-    --warm-preset "${COSMOS_GEN_PRESET:-live}"
+  stage warm-cache "$PY" scripts/run_pipeline.py --data-source "$DATA_SOURCE" --data-dir "$DATA_DIR" --only warm-cache \
+    --warm-preset "${COSMOS_GEN_PRESET:-live}" --warm-limit "${WARM_LIMIT:-24}" --warm-photo-limit "${WARM_PHOTO_LIMIT:-24}"
 else
   say "Cosmos 3 servers did not come up -> copilot will use nim/replay"
 fi

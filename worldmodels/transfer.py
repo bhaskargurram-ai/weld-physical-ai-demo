@@ -84,7 +84,7 @@ def build_transfer_request(controls: dict[str, str], prompt: Any, *, seed: int =
         sc = scene or {}
         prompt_text = compact(weld_scene_prompt(str(prompt), process=sc.get("process", "FCAW"),
                                                 pass_type=sc.get("pass_type", "fill"), defect=sc.get("defect"),
-                                                view=sc.get("view", "torch"), seconds=num_frames / fps, fps=fps,
+                                                view=sc.get("view", "torch"), source=sc.get("source"), seconds=num_frames / fps, fps=fps,
                                                 width=width, height=height, for_transfer=True))
     return {
         "controls": {k: str(Path(v).resolve()) for k, v in controls.items()},

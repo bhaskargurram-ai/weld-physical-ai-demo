@@ -18,11 +18,20 @@ from typing import Any, Optional
 
 from .config import repo_root
 
-PROMPT_VERSION = "weldqa-v1"
+PROMPT_VERSION = "weldqa-v2"
 
 DEFECT_TYPES = ("porosity", "lack_of_fusion", "undercut", "burn_through", "arc_instability", "crack")
-SIGNALS = ("current_a", "voltage_v", "wfs_mpm", "gas_lpm", "travel_speed_mmps", "heat_input_kj_mm", "interpass_c")
+SIGNALS = ("current_a", "voltage_v", "wfs_mpm", "gas_lpm", "travel_speed_mmps", "heat_input_kj_mm", "interpass_c",
+           "current2_a", "voltage2_v", "wfs2_mpm")
 SIGNAL_LABELS = {
+    "current2_a": ("trail-electrode current", "A"),
+    "voltage2_v": ("trail-electrode voltage", "V"),
+    "wfs2_mpm": ("trail-electrode wire feed speed", "m/min"),
+    "position_mm": ("torch position along the joint", "mm"),
+    "temp_left_c": ("left pyrometer", "degC"),
+    "temp_right_c": ("right pyrometer", "degC"),
+    "temp_back_c": ("back pyrometer (pool region)", "degC"),
+    "thermo2_c": ("thermocouple 2", "degC"),
     "current_a": ("arc current", "A"),
     "voltage_v": ("arc voltage", "V"),
     "wfs_mpm": ("wire feed speed", "m/min"),
@@ -43,27 +52,31 @@ THINK_SUFFIX = (
     "Write your final answer immediately after the </think> tag."
 )
 
-CWI_SYSTEM_PROMPT = """You are an AWS Certified Welding Inspector (CWI) and ASME Section IX welding engineer \
-doing final visual and process review for a pressure-vessel and process-piping fabrication shop \
-(ASME BPVC Section VIII vessels, ASME B31.3 process piping skids; carbon steel such as SA-106 Gr.B pipe).
+CWI_SYSTEM_PROMPT = """You are an AWS Certified Welding Inspector (CWI) and welding engineer doing visual and \
+process review for a heavy-fabrication shop: pressure vessels in SA-516 Gr.70 plate (ASME BPVC Section VIII, \
+procedures qualified to ASME Section IX) and structural steelwork in S355 (EN 1090 / ISO 5817), welded by robotic and mechanised \
+processes including two-wire tandem submerged arc welding (SAW) and tandem GMAW.
 
-You review robotic weld-cell evidence: torch-camera video of the arc and weld pool plus the cell's \
-logged arc, travel and thermal signals, and you compare them against the qualified Welding Procedure \
-Specification (WPS). Apply these rules:
-- ASME Section IX: the WPS ranges (current, voltage, travel speed, wire feed, shielding gas flow, \
-heat input, maximum interpass temperature) are the qualified envelope. Sustained operation outside \
-a range is a WPS non-compliance even if the bead looks acceptable.
-- ASME B31.3 Table 341.3.2 (Normal Fluid Service) visual / RT acceptance: cracks and lack of fusion \
-are rejectable at any size; incomplete penetration and undercut are only acceptable within tight \
-depth/length limits (undercut no deeper than the lesser of 1 mm and Tw/4); surface porosity is \
-rejectable on thin wall; burn-through / excessive root concavity and arc strikes are rejectable.
-- Typical process signatures: gas-flow loss or contamination -> porosity; low current or high travel \
-speed (low heat input) -> lack of fusion; high voltage or fast travel -> undercut; high current or \
-slow travel on the root -> burn-through; voltage noise / oscillating wire feed -> arc instability; \
-interpass temperature above the WPS maximum -> cracking risk.
-- Be calibrated. Only report defects the video or the signals actually support. If the footage is \
-ambiguous or the evidence is only from sensors, use verdict "review" and say what to check \
-(e.g. RT/UT, PT/MT, visual with a gauge).
+You review real weld evidence: process-camera video (torch-mounted or fixed; colour, or grayscale \
+high-dynamic-range with a data overlay) or a post-weld photo of the finished bead, together with the logged \
+arc signals (lead electrode, plus the trail electrode for tandem processes), travel and thermal signals, the \
+procedure's parameter ranges and, when available, the NDT result (RT / UT indications with position). Apply \
+these rules:
+- The parameter ranges are the qualified envelope (or, where stated, the published nominal setting +-10 %). \
+Sustained operation outside a range is a non-compliance even if the bead looks acceptable.
+- Acceptance: cracks and lack of fusion are rejectable at any size; porosity, undercut and incomplete \
+penetration are acceptable only within size / length limits (B31.3 Table 341.3.2, ASME VIII UW-51, \
+ISO 5817 quality levels), so an indication of unknown size needs review against the NDT report.
+- Typical process signatures: gas-flow loss or contamination (or damp flux on SAW) -> porosity; low current \
+or high travel speed (low heat input) -> lack of fusion; high voltage or fast travel -> undercut; high \
+current or slow travel -> burn-through; voltage noise / oscillating wire feed -> arc instability; interpass \
+temperature above the maximum -> cracking risk.
+- Real defects often leave NO signature in the arc signals (e.g. porosity from flux moisture or \
+contamination at normal current and voltage). Never invent a signal excursion; if the signals are normal, \
+say so explicitly ("no electrical signature") and rely on the NDT result and the image.
+- Be calibrated. Only report defects the image, the NDT record or the signals actually support. Subsurface \
+NDT indications may not be visible in a surface photo or camera view. If the evidence is ambiguous, use \
+verdict "review" and say what to check (RT/UT report, PT/MT, visual with a gauge).
 Always answer with the requested JSON object."""
 
 ASSESS_SCHEMA_HINT = """{
@@ -179,7 +192,35 @@ def normalize_context(context: Optional[dict]) -> dict:
         "rt_result": ctx.get("rt_result", meta.get("rt_result")),
         "caption": ctx.get("caption"),
         "question": ctx.get("question"),
+        "electrodes": get("electrodes"),
+        "thickness_mm": get("thickness_mm"),
+        "source": _source(ctx, meta),
+        "ndt": _ndt(ctx, meta),
+        "media_type": ctx.get("media_type"),
+        "photo_note": ctx.get("photo_note"),
+        "video_kind": ctx.get("video_kind") or ((meta.get("video") or {}).get("kind")
+                                                if isinstance(meta.get("video"), dict) else None),
+        "wps_basis": get("wps_basis"),
     }
+
+
+def _source(ctx: dict, meta: dict) -> dict:
+    for cand in (ctx.get("source"), meta.get("source")):
+        if isinstance(cand, dict):
+            return cand
+    return {}
+
+
+def _ndt(ctx: dict, meta: dict) -> dict:
+    for cand in (ctx.get("ndt"), meta.get("ndt")):
+        if isinstance(cand, dict):
+            return cand
+    return {}
+
+
+def is_real(c: dict) -> bool:
+    src = c.get("source") or {}
+    return bool(src) and not src.get("synthetic", False) and src.get("id") not in (None, "weldcell_sim")
 
 
 def _fmt(v: Any, nd: int = 2) -> str:
@@ -204,15 +245,71 @@ def describe_pass(c: dict) -> str:
     if c.get("pass_type") or c.get("pass_no"):
         bits.append(f"pass {c.get('pass_no', '?')} ({c.get('pass_type', '?')})")
     if c.get("process"):
-        bits.append(f"process {c['process']}")
+        n = c.get("electrodes")
+        tandem = isinstance(n, (int, float)) and n > 1
+        bits.append(f"process {'tandem ' if tandem else ''}{c['process']}"
+                    + (f" ({int(n)} electrodes: lead + trail)" if tandem else ""))
     if c.get("position"):
         bits.append(f"position {c['position']}")
     if c.get("material"):
         geo = ""
         if c.get("pipe_od_mm"):
             geo = f", OD {_fmt(c['pipe_od_mm'])} mm x {_fmt(c.get('wall_mm', '?'))} mm wall"
+        if not geo and c.get("thickness_mm"):
+            geo = f", {_fmt(c['thickness_mm'])} mm thick"
         bits.append(f"material {c['material']}{geo}")
+    src = c.get("source") or {}
+    if src.get("id"):
+        bits.append(f"data source {src['id']}" + (" (synthetic)" if src.get("synthetic") else
+                                                  f" (real, {src.get('license', 'see source')})"))
     return "; ".join(bits) or "Robotic weld pass (no metadata supplied)"
+
+
+def describe_ndt(c: dict) -> str:
+    """NDT record of the pass (real data): methods, indications in this window with time and position."""
+    ndt = c.get("ndt") or {}
+    rt = c.get("rt_result")
+    if not ndt and rt not in ("indications", "no_indications", "not_inspected"):
+        return ""
+    methods = "/".join(ndt.get("methods") or []) or "NDT"
+    if rt == "not_inspected" or ndt.get("inspected") is False:
+        return "NDT record: this weld was not NDT-inspected (no ground-truth defect labels)."
+    inds = ndt.get("indications_in_window")
+    if inds is None:
+        inds = [d for d in c.get("defects") or [] if isinstance(d, dict)]
+    t0 = c.get("t0_s") if isinstance(c.get("t0_s"), (int, float)) else 0.0
+    lines = []
+    for d in inds:
+        typ = d.get("defect") or d.get("type") or "indication"
+        ts, te = d.get("t_start_s", d.get("t_start")), d.get("t_end_s", d.get("t_end"))
+        when = (f" at t={_fmt(ts - t0)}-{_fmt(te - t0)} s from the start of this window"
+                if isinstance(ts, (int, float)) and isinstance(te, (int, float)) else "")
+        where = (f", x={_fmt(d['x_start_mm'])}-{_fmt(d['x_end_mm'])} mm along the weld"
+                 if isinstance(d.get("x_start_mm"), (int, float)) and isinstance(d.get("x_end_mm"), (int, float)) else "")
+        lines.append(f"- {str(typ).replace('_', ' ')}{when}{where}")
+    if lines:
+        return f"NDT record ({methods} of the finished weld) - indications in this window:\n" + "\n".join(lines)
+    if rt == "indications":
+        return f"NDT record ({methods}): no indication in this window; the pass has indications elsewhere."
+    return f"NDT record ({methods}): no indication in this pass."
+
+
+def describe_media(c: dict, media: str = "video") -> str:
+    real = is_real(c)
+    if media == "image":
+        txt = ("Inspect this post-weld photo of the finished bead together with the logged process data of the "
+               "window it is linked to, and give your weld-quality assessment.")
+        if c.get("photo_note"):
+            txt += f" {c['photo_note']}"
+        return txt
+    if real:
+        kind = str(c.get("video_kind") or "process camera").replace("_", " ")
+        src = (c.get("source") or {}).get("id")
+        extra = " (grayscale high-dynamic-range process camera with the BAM data overlay)" if src == "bam_tgmaw" else ""
+        return (f"Inspect this {kind} clip{extra} of a robotic weld together with the logged process data and "
+                "give your weld-quality assessment.")
+    return ("Inspect this torch-camera clip of a robotic weld pass together with the logged process data and give "
+            "your weld-quality assessment.")
 
 
 def describe_wps(c: dict) -> str:
@@ -226,7 +323,16 @@ def describe_wps(c: dict) -> str:
             parts.append(f"{label} {_fmt_range(w[k])} {unit}".strip())
     if "max_interpass_c" in w:
         parts.append(f"max interpass {_fmt(w['max_interpass_c'])} degC")
-    return f"WPS {w.get('wps_id', c.get('wps_id') or '')} ({w.get('process', c.get('process') or '')}) qualified ranges: " + "; ".join(parts) + "."
+    for k in ("current2_a", "voltage2_v", "wfs2_mpm"):
+        if k in w:
+            label, unit = SIGNAL_LABELS.get(k, (k, ""))
+            parts.append(f"{label} {_fmt_range(w[k])} {unit}".strip())
+    if "gas_lpm" not in w and str(c.get("process") or w.get("process") or "").upper() == "SAW":
+        parts.append("no shielding gas (flux-shielded SAW)")
+    kind = "qualified ranges"
+    if c.get("wps_basis"):
+        kind = f"ranges ({c['wps_basis']})"
+    return f"WPS {w.get('wps_id', c.get('wps_id') or '')} ({w.get('process', c.get('process') or '')}) {kind}: " + "; ".join(parts) + "."
 
 
 def describe_stats(c: dict) -> str:
@@ -248,7 +354,11 @@ def describe_stats(c: dict) -> str:
 
 def describe_violations(c: dict) -> str:
     vs = c.get("wps_violations") or []
-    if not vs:
+    if is_real(c):
+        if not vs:
+            return ("Excursions of the 0.5 s signal averages outside the ranges in this window: none (no "
+                    "electrical signature).")
+    elif not vs:
         return "WPS excursions logged by the cell controller in this window: none."
     lines = []
     t0 = c.get("t0_s") or 0.0
@@ -264,7 +374,9 @@ def describe_violations(c: dict) -> str:
             when = f" from t={_fmt(rel)} s" + (f" to {_fmt(te - t0 if te >= t0 else te)} s" if isinstance(te, (int, float)) else "")
         lim = f" (WPS {_fmt(v.get('limit_lo'))}-{_fmt(v.get('limit_hi'))} {unit})" if "limit_lo" in v else ""
         lines.append(f"- {label}: {_fmt(v.get('value'))} {unit}{lim}{when}".strip())
-    return "WPS excursions logged by the cell controller (times relative to clip start):\n" + "\n".join(lines)
+    head = ("Excursions of the 0.5 s signal averages outside the ranges" if is_real(c) else
+            "WPS excursions logged by the cell controller")
+    return head + " (times relative to clip start):\n" + "\n".join(lines)
 
 
 def describe_labels(c: dict) -> str:
@@ -276,19 +388,23 @@ def describe_labels(c: dict) -> str:
     return "\n".join(parts)
 
 
-def build_assess_text(context: Optional[dict], *, think: bool = True, include_labels: bool = False) -> str:
+def build_assess_text(context: Optional[dict], *, think: bool = True, include_labels: bool = False,
+                      media: str = "video") -> str:
     c = normalize_context(context)
     window = ""
     if isinstance(c.get("t0_s"), (int, float)) and isinstance(c.get("t1_s"), (int, float)):
-        window = f" The clip covers t={_fmt(c['t0_s'])}-{_fmt(c['t1_s'])} s of the pass; report defect times relative to the clip start."
+        window = (f" The clip covers t={_fmt(c['t0_s'])}-{_fmt(c['t1_s'])} s of the pass; report defect times relative "
+                  "to the clip start." if media != "image" else
+                  f" The linked process window is t={_fmt(c['t0_s'])}-{_fmt(c['t1_s'])} s of the pass.")
     sections = [
-        "Inspect this torch-camera clip of a robotic weld pass together with the logged process data and give "
-        "your weld-quality assessment." + window,
+        describe_media(c, media) + window,
         describe_pass(c),
         describe_wps(c),
         describe_stats(c),
         describe_violations(c),
     ]
+    if is_real(c):   # real data: the NDT record is the ground truth the shop has, part of the evidence
+        sections.append(describe_ndt(c))
     if include_labels:
         lab = describe_labels(c)
         if lab:
@@ -311,9 +427,11 @@ def build_explain_text(context: Optional[dict]) -> str:
     return "\n\n".join([
         "Explain, for a fabrication-shop supervisor, what these weld-cell signals say about this pass: "
         "which parameters were inside the WPS envelope, which were not, what defect each excursion is likely "
-        "to cause, and what to check next. Plain text, at most 8 short bullet points.",
+        "to cause, and what to check next. If every signal is normal, say plainly that there is no electrical "
+        "signature (a defect reported by NDT can still be present). Plain text, at most 8 short bullet points.",
         describe_pass(c), describe_wps(c), describe_stats(c), describe_violations(c),
-    ])
+        describe_ndt(c) if is_real(c) else "",
+    ]).strip()
 
 
 # ------------------------------------------------------------------ generator prompts
@@ -335,6 +453,34 @@ SHOP_BACKGROUND = (
 )
 
 
+# Real-data scenes (docs/REAL_DATA.md): what the source camera / cell actually looks like.
+REAL_SCENES = {
+    "bam_tgmaw": {
+        "background": ("A welding laboratory cell: a 30 mm thick S355 structural-steel plate with a deep V-groove "
+                       "clamped on a welding table, a robot-held tandem GMAW torch with two wires, dark surroundings."),
+        "subject": "A tandem GMAW layer (lead and trail wire in one shared pool) in a deep V-groove of a thick steel plate",
+        "camera": {"camera_motion": "Static process camera aimed at the arc and weld pool",
+                   "framing": "Close-up of the arcs, the shared weld pool and the groove",
+                   "camera_angle": "Oblique view along the groove", "depth_of_field": "Medium",
+                   "focus": "Sharp on the weld pool",
+                   "lens_focal_length": "Industrial high-dynamic-range process camera, grayscale"},
+        "style": "Realistic grayscale high-dynamic-range process-camera footage (keep the data overlay)",
+        "context": "Robotic tandem GMAW of a thick S355J2+N plate in a welding research laboratory (BAM)",
+    },
+    "aimen_saw": {
+        "background": ("A heavy-fabrication welding cell: a 52 mm SA-516 Gr.70 plate butt joint under a "
+                       "submerged-arc welding head with two wires, a flux hopper and a flux recovery nozzle."),
+        "subject": "A two-wire tandem submerged-arc weld bead forming under a blanket of granular flux",
+        "camera": {"camera_motion": "Static", "framing": "Medium close-up of the welding head and the joint",
+                   "camera_angle": "Slightly elevated side view", "depth_of_field": "Medium",
+                   "focus": "Sharp on the flux blanket and the solidified slag behind the head",
+                   "lens_focal_length": "35-50mm equivalent"},
+        "style": "Realistic industrial footage; the arc is hidden under the flux, only an orange glow escapes",
+        "context": "Mechanised two-wire tandem SAW of a pressure-vessel steel plate (AIMEN)",
+    },
+}
+
+
 def _camera(view: str) -> dict:
     if view == "cell":
         return {"camera_motion": "Static", "framing": "Medium-wide shot of the robot, torch and rotating pipe",
@@ -351,7 +497,7 @@ def weld_scene_prompt(description: str, *, process: str = "FCAW", pass_type: str
                       defect: Optional[str] = None, view: str = "torch", seconds: float = 5.0,
                       fps: float = 24.0, width: int = 832, height: int = 480,
                       actions: Optional[list[dict]] = None, temporal_caption: Optional[str] = None,
-                      for_transfer: bool = False) -> dict:
+                      for_transfer: bool = False, source: Optional[str] = None) -> dict:
     """Cosmos3 JSON-style prompt for a weld-cell scene.
 
     ``description`` is the free-text scenario ("travel speed drops 20 %...");
@@ -403,6 +549,16 @@ def weld_scene_prompt(description: str, *, process: str = "FCAW", pass_type: str
         "duration": dur,
         "fps": fps,
     }
+    real = REAL_SCENES.get(str(source)) if source else None
+    if real:
+        subject["description"] = f"{real['subject']}. {description}".strip()
+        subject["relationship"] = "The robot torch deposits the bead along the fixed plate"
+        prompt["background_setting"] = real["background"]
+        prompt["cinematography"] = dict(real["camera"])
+        prompt["artistic_style"] = real["style"]
+        prompt["context"] = real["context"]
+        if source == "bam_tgmaw":
+            prompt["aesthetics"]["color_scheme"] = "Grayscale: saturated white arcs, bright pool, dark steel"
     if for_transfer:
         prompt["context"] += "; photoreal rendering that follows the structure of the provided control video exactly"
     return prompt

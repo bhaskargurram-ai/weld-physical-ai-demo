@@ -90,7 +90,7 @@ def build_request(prompt: Any, *, image_path: Optional[str] = None, video_path: 
         sc = scene or {}
         prompt_text = compact(weld_scene_prompt(str(prompt), process=sc.get("process", "FCAW"),
                                                 pass_type=sc.get("pass_type", "fill"), defect=sc.get("defect"),
-                                                view=sc.get("view", "torch"), seconds=frames / fps_v, fps=fps_v,
+                                                view=sc.get("view", "torch"), source=sc.get("source"), seconds=frames / fps_v, fps=fps_v,
                                                 width=width, height=height))
     return {
         "mode": _mode(image_path, video_path),

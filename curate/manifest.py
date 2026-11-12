@@ -12,14 +12,17 @@ from curate.common import (ClipInput, defects_overlapping, log, normalize_signal
                            violations_overlapping)
 from curate.prompts import all_variants, prompt_text
 
-# Contract (docs/PLAN.md "Curation output"): exactly these keys, in this order.
+# Contract (docs/PLAN.md "Curation output"): exactly these keys, in this order. ``media_type`` (video | image)
+# and ``source`` ({id, license, attribution, ...} of the dataset) were added for the real-data sources
+# (docs/REAL_DATA.md); image rows have clip_uri = clips/<clip_id>.jpg (a post-weld bead photo).
 MANIFEST_KEYS = ("clip_id", "clip_uri", "sequence_name", "t0_s", "t1_s", "caption", "caption_model",
                  "sensor_summary", "wps_violations", "defects", "rt_result", "quality", "kept",
-                 "reject_reason", "generator_prompt")
+                 "reject_reason", "generator_prompt", "media_type", "source")
 
 
 # pass metadata copied into sensor_summary next to the per-signal {mean,std,min,max} dicts
-PASS_KEYS = ("process", "pass_type", "pass_no", "wps_id", "position", "material", "spool_id", "joint_id", "cell_id")
+PASS_KEYS = ("process", "pass_type", "pass_no", "wps_id", "position", "material", "spool_id", "joint_id", "cell_id",
+             "electrodes", "thickness_mm")
 
 
 @dataclass
@@ -76,6 +79,10 @@ class ClipRecord:
             "t0_s": self.t0_s, "t1_s": self.t1_s, "meta": self.source.meta,
             "signal_stats": sc.get("signal_stats") or {}, "wps_violations": viol,
             "defects": defects, "rt_result": sc.get("rt_result", self.source.meta.get("rt_result")),
+            "media_type": self.source.media_type, "source": self.source.source_info,
+            "video_kind": sc.get("video_kind"), "photo_note": sc.get("photo_note"),
+            "ndt": sc.get("ndt") if isinstance(sc.get("ndt"), dict) else self.source.meta.get("ndt"),
+            "electrodes": sc.get("electrodes") or self.source.meta.get("electrodes"),
         }
 
 
@@ -88,7 +95,7 @@ def apply_filters(records: list[ClipRecord], th: Thresholds) -> None:
         reason = None
         if q.get("error"):
             reason = "decode_error"
-        elif (r.end_s - r.start_s) < th.min_duration_s:
+        elif not r.source.is_image and (r.end_s - r.start_s) < th.min_duration_s:
             reason = "too_short"
         elif q.get("mean_luma") is not None and (q["mean_luma"] < th.min_mean_luma
                                                  or q.get("dark_frac", 0) > th.max_dark_frac):
@@ -168,6 +175,9 @@ def manifest_row(r: ClipRecord) -> dict[str, Any]:
         "kept": bool(r.kept),
         "reject_reason": r.reject_reason,
         "generator_prompt": gen,
+        "media_type": r.source.media_type,
+        "source": {k: v for k, v in ctx["source"].items() if k in ("id", "license", "attribution", "doi", "url",
+                                                                    "title", "synthetic")},
     }
     assert tuple(row) == MANIFEST_KEYS
     return row

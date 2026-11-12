@@ -7,23 +7,30 @@ SHELL        := /bin/bash
 PYTHON_VERSION ?= 3.12
 VENV       ?= .venv
 PY         := $(VENV)/bin/python
-DATA_DIR   ?= ./data
+# data: real public datasets by default (docs/REAL_DATA.md); DATA_SOURCE=sim for the WeldCell simulator
+DATA_SOURCE  ?= real
+DATA_DIR     ?= $(if $(filter sim,$(DATA_SOURCE)),./data,./data/real)
+REAL_SOURCES ?= aimen_saw,bam_tgmaw
+AIMEN_COUPONS ?=
+BAM_WIDS     ?= 617,630
 N_PASSES   ?= 24
 SEED       ?= 7
 BACKEND    ?= lite
 PORT       ?= 7860
 COMPOSE    ?= docker compose -f infra/docker-compose.yml
-PIPELINE   := $(PY) scripts/run_pipeline.py --data-dir $(DATA_DIR) --n-passes $(N_PASSES) --seed $(SEED) --backend $(BACKEND)
+DATA_ARGS  := --data-source $(DATA_SOURCE) --data-dir $(DATA_DIR) --real-sources $(REAL_SOURCES) \
+              --aimen-coupons '$(AIMEN_COUPONS)' --bam-wids '$(BAM_WIDS)'
+PIPELINE   := $(PY) scripts/run_pipeline.py $(DATA_ARGS) --n-passes $(N_PASSES) --seed $(SEED) --backend $(BACKEND)
 # load .env (copy of configs/demo.env.example) without clobbering variables already set in the shell
 # (an empty `ANTHROPIC_API_KEY=` line must not wipe a key you exported) — same loader as runpod/
 LOAD_ENV   := . runpod/lib.sh && load_env_file .env;
 
-.PHONY: help setup-local env cloud-run cloud-serve cloud-status cloud-logs cloud-down infra-up infra-down infra-logs simulate ingest export curate warm-cache \
+.PHONY: help setup-local env cloud-run cloud-serve cloud-status cloud-logs cloud-down infra-up infra-down infra-logs collect fixture-real simulate ingest export curate warm-cache \
         pipeline copilot copilot-fixtures demo-local demo-runpod runpod-bootstrap runpod-status runpod-stop \
         test lint clean
 
 help:  ## show targets
-	@awk 'BEGIN{FS=":.*## "; printf "\nWeldWorld targets (vars: DATA_DIR=$(DATA_DIR) BACKEND=$(BACKEND) N_PASSES=$(N_PASSES))\n\n"} \
+	@awk 'BEGIN{FS=":.*## "; printf "\nWeldWorld targets (vars: DATA_SOURCE=$(DATA_SOURCE) DATA_DIR=$(DATA_DIR) BAM_WIDS=$(BAM_WIDS) BACKEND=$(BACKEND))\n\n"} \
 	     /^[a-zA-Z_-]+:.*## /{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 # ------------------------------------------------------------------ setup
@@ -52,13 +59,19 @@ infra-logs:  ## follow local infra logs
 	$(COMPOSE) logs -f --tail=50
 
 # ------------------------------------------------------------------ pipeline stages
-simulate:  ## 1. generate N_PASSES synthetic weld passes -> data/generated
+collect:  ## 1. fetch + convert real data (AIMEN SAW + BAM tandem GMAW; DATA_SOURCE=sim: simulator) -> $(DATA_DIR)/generated
 	$(PIPELINE) --only collect
 
-ingest:  ## 2. ingest data/generated into Mosaico (needs mosaicod: infra-up)
+simulate:  ## 1'. generate N_PASSES synthetic weld passes (WeldCell simulator) -> data/generated
+	$(MAKE) --no-print-directory collect DATA_SOURCE=sim
+
+fixture-real:  ## tiny contract-compliant real-data fixture (1 SAW + 1 tandem GMAW pass) -> data/fixture_real
+	$(PY) -m mosaico_io.testdata data/fixture_real
+
+ingest:  ## 2. ingest $(DATA_DIR)/generated into Mosaico (needs mosaicod: infra-up)
 	$(PIPELINE) --only ingest --strict
 
-export:  ## 3. query Mosaico + export 5 s clips with sensor sidecars -> data/export
+export:  ## 3. query Mosaico + export 5 s clips / photo sidecars around NDT indications -> $(DATA_DIR)/export
 	$(PIPELINE) --only export
 
 curate:  ## 4. curate clips -> data/curated (BACKEND=lite|curator-next|curator-legacy)
@@ -72,14 +85,14 @@ pipeline:  ## run all stages (auto-falls back to offline if mosaicod is down)
 
 # ------------------------------------------------------------------ app
 copilot:  ## start the Weld Copilot on :7860 (uses .env)
-	$(LOAD_ENV) DATA_DIR=$(DATA_DIR) $(VENV)/bin/uvicorn copilot.app:app --host 0.0.0.0 --port $(PORT)
+	$(LOAD_ENV) DATA_DIR=$(DATA_DIR) DATA_SOURCE=$(DATA_SOURCE) $(VENV)/bin/uvicorn copilot.app:app --host 0.0.0.0 --port $(PORT)
 
 copilot-fixtures:  ## start the copilot on checked-in fixtures (no pipeline run, no services)
 	$(LOAD_ENV) COPILOT_FIXTURES=1 COSMOS_BACKEND=replay MOSAICO_OFFLINE=1 DATA_DIR=data/fixtures \
 	  $(VENV)/bin/uvicorn copilot.app:app --host 0.0.0.0 --port $(PORT)
 
 # ------------------------------------------------------------------ end-to-end
-demo-local: setup-local  ## CPU-only end-to-end: simulate -> (Mosaico if up) -> export -> curate-lite -> copilot (replay)
+demo-local: setup-local  ## CPU-only end-to-end: real data -> (Mosaico if up) -> export -> curate-lite -> copilot (replay)
 	@if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then $(MAKE) --no-print-directory infra-up || true; \
 	 else echo "docker not available -> Mosaico offline mode (data/generated is read directly)"; fi
 	$(LOAD_ENV) COSMOS_BACKEND=replay $(PIPELINE) --replay --keep-going
@@ -88,10 +101,10 @@ demo-local: setup-local  ## CPU-only end-to-end: simulate -> (Mosaico if up) -> 
 demo-runpod:  ## on the pod: infra -> pipeline (Curator if available) -> Cosmos 3 servers -> warm cache -> copilot
 	bash runpod/start_all.sh infra
 	. runpod/lib.sh && load_env && \
-	  $(PY) scripts/run_pipeline.py --data-dir $(DATA_DIR) --n-passes $(N_PASSES) --seed $(SEED) \
+	  $(PY) scripts/run_pipeline.py $(DATA_ARGS) --n-passes $(N_PASSES) --seed $(SEED) \
 	    --backend $${CURATE_BACKEND:-lite} --skip warm-cache --keep-going
 	bash runpod/start_all.sh models --wait
-	. runpod/lib.sh && load_env && $(PY) scripts/run_pipeline.py --data-dir $(DATA_DIR) --only warm-cache
+	. runpod/lib.sh && load_env && $(PY) scripts/run_pipeline.py $(DATA_ARGS) --only warm-cache
 	bash runpod/start_all.sh copilot
 
 # ------------------------------------------------------------------ Runpod from your laptop (.env keys)

@@ -19,8 +19,9 @@ import numpy as np
 import pandas as pd
 
 from collect.schema import ARC_HZ, TOPIC_ARC, TOPIC_THERMAL, TOPIC_TRAVEL
-from mosaico_io.common import (SIGNALS, assemble_signals, avg_signals, connect, is_offline, json_default,
-                               load_meta, local_sequences, meta_row, offline_signals)
+from mosaico_io.common import (ARC_COLS, SIGNALS, THERMAL_COLS, TRAVEL_COLS, assemble_signals, avg_signals, connect,
+                               flat_keys,
+                               is_offline, json_default, load_meta, local_sequences, meta_row, offline_signals)
 
 _OPS = ("eq", "neq", "gt", "geq", "lt", "leq", "match", "in_", "between")
 
@@ -92,6 +93,7 @@ def list_passes(**filters) -> list[dict]:
     if is_offline():
         for seq in local_sequences():
             m = load_meta(seq)
+            m = {**flat_keys(m), **m}
             if all(_match_local(m, k, op, v) for k, op, v in parsed):
                 rows.append(meta_row(m))
     else:
@@ -145,11 +147,18 @@ def _online_signals(seq: str, t0_s=None, t1_s=None) -> pd.DataFrame:
         sel = {c: c.rsplit(".", 1)[-1] for c in raw.columns if c.startswith(topic + ".")}
         sel = {c: f for c, f in sel.items() if f in cols}
         df = raw[["timestamp_ns", *sel]].rename(columns={"timestamp_ns": "t_ns", **sel})
-        return df.dropna(subset=list(sel.values())).drop_duplicates("t_ns").reset_index(drop=True)
+        # rows of other topics have all of this topic's fields null; a NaN gas column (SAW) must survive
+        df = df.dropna(subset=list(sel.values()), how="all").drop_duplicates("t_ns").reset_index(drop=True)
+        return df.drop(columns=[c for c in sel.values() if df[c].isna().all() and c not in cols[:1]])
 
-    arc = part(TOPIC_ARC, ["current_a", "voltage_v", "wfs_mpm", "gas_lpm"])
-    trv = part(TOPIC_TRAVEL, ["travel_speed_mmps", "positioner_deg", "heat_input_kj_mm"])
-    thm = part(TOPIC_THERMAL, ["interpass_c"])
+    def part_or_none(topic, cols):
+        if not any(c.startswith(topic + ".") for c in raw.columns):
+            return None
+        return part(topic, cols)
+
+    arc = part(TOPIC_ARC, list(ARC_COLS))
+    trv = part_or_none(TOPIC_TRAVEL, list(TRAVEL_COLS))
+    thm = part_or_none(TOPIC_THERMAL, list(THERMAL_COLS))
     return assemble_signals(arc, trv, thm, t0_ns, t0_s, t1_s)
 
 
@@ -160,7 +169,8 @@ def get_signals(seq: str, t0_s: Optional[float] = None, t1_s: Optional[float] = 
 
 # ------------------------------------------------------------------ WPS compliance
 
-WPS_PARAMS = ("current_a", "voltage_v", "travel_speed_mmps", "wfs_mpm", "gas_lpm", "heat_input_kj_mm")
+WPS_PARAMS = ("current_a", "voltage_v", "travel_speed_mmps", "wfs_mpm", "gas_lpm", "heat_input_kj_mm",
+              "current2_a", "voltage2_v", "wfs2_mpm")   # *2*: trail electrode of tandem processes
 
 
 def _runs(mask: np.ndarray, t: np.ndarray, min_duration_s: float, gap_s: float = 0.0):
@@ -184,27 +194,36 @@ def _arc_window(meta: dict, df: pd.DataFrame) -> tuple[float, float]:
     return 0.5, arc_on_s - 1.0      # skip hot-start ramp and programmed crater fill
 
 
+def _has_range(wps: dict, p: str) -> bool:
+    r = wps.get(p)
+    return (isinstance(r, (list, tuple)) and len(r) == 2 and all(isinstance(x, (int, float)) for x in r)
+            and all(np.isfinite(r)))
+
+
 def violations_from_signals(df: pd.DataFrame, meta: dict, min_duration_s: float = 0.2) -> list[dict]:
+    """WPS excursions of the 0.5 s averages. Parameters whose WPS range or signal is missing (no gas on SAW,
+    no trail electrode on single-wire passes, ...) are skipped, not reported."""
     wps = meta.get("wps", {})
     if df.empty or not wps:
         return []
     avg = avg_signals(df)
     t = avg["t_s"].to_numpy()
     a0, a1 = _arc_window(meta, df)
-    on = (t >= a0) & (t <= a1) & (avg["current_a"].to_numpy() > 10)
+    cur = avg["current_a"].to_numpy(dtype=float)
+    on = (t >= a0) & (t <= a1) & (np.nan_to_num(cur, nan=0.0) > 10)
     out = []
     for p in WPS_PARAMS:
-        if p not in wps or p not in avg:
+        if not _has_range(wps, p) or p not in avg or not avg[p].notna().any():
             continue
-        lo, hi = wps[p]
-        x = avg[p].to_numpy()
+        lo, hi = (float(v) for v in wps[p])
+        x = avg[p].to_numpy(dtype=float)
         for kind, mask in (("high", on & (x > hi)), ("low", on & (x < lo))):
             for i0, i1 in _runs(mask, t, min_duration_s):
                 seg = x[i0:i1 + 1]
                 out.append({"param": p, "t_start_s": round(float(t[i0]), 2), "t_end_s": round(float(t[i1]), 2),
                             "value": round(float(seg.max() if kind == "high" else seg.min()), 3),
                             "limit_lo": lo, "limit_hi": hi, "kind": kind})
-    if "interpass_c" in avg and "max_interpass_c" in wps:
+    if "interpass_c" in avg and avg["interpass_c"].notna().any() and isinstance(wps.get("max_interpass_c"), (int, float)):
         x = avg["interpass_c"].to_numpy()
         lim = float(wps["max_interpass_c"])
         for i0, i1 in _runs(x > lim, t, min_duration_s):
@@ -294,8 +313,10 @@ def find_anomalies(param: str, gt: Optional[float] = None, lt: Optional[float] =
             if relative_to_wps and _normal_satisfies(meta, param, gt, lt):
                 continue
             df = offline_signals(seq)
+            if param not in df or not df[param].notna().any():
+                continue                      # signal not recorded for this pass (e.g. gas on SAW)
             src = df if raw else avg_signals(df)
-            x, t = src[param].to_numpy(), src["t_s"].to_numpy()
+            x, t = src[param].to_numpy(dtype=float), src["t_s"].to_numpy()
             mask = np.ones_like(x, dtype=bool)
             if gt is not None:
                 mask &= x > gt
@@ -352,7 +373,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Query weld passes (Mosaico or offline)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     pl = sub.add_parser("list")
-    for k in ("process", "spool_id", "joint_id", "pass_type", "wps_id", "rt_result", "defect_types"):
+    for k in ("process", "spool_id", "joint_id", "pass_type", "wps_id", "rt_result", "defect_types", "source_id"):
         pl.add_argument(f"--{k}")
     pl.add_argument("--has_defect", choices=["true", "false"])
     pa = sub.add_parser("anomalies")
@@ -370,12 +391,14 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.cmd == "list":
         f = {k: getattr(a, k) for k in ("process", "spool_id", "joint_id", "pass_type", "wps_id", "rt_result",
-                                        "defect_types") if getattr(a, k)}
+                                        "defect_types", "source_id") if getattr(a, k)}
         if a.has_defect:
             f["has_defect"] = a.has_defect == "true"
         for r in list_passes(**f):
-            print(f"{r['sequence_name']:<22} {r['process']:<5} {r['pass_type']:<5} HI={r['heat_input_mean_kj_mm']:.2f} "
-                  f"defect={r['defect_types']:<16} RT={r['rt_result']}")
+            hi = r.get("heat_input_mean_kj_mm")
+            print(f"{r['sequence_name']:<22} {r.get('source_id') or '-':<13} {r['process']:<5} {r['pass_type'] or '-':<5} "
+                  f"HI={'%.2f' % hi if isinstance(hi, (int, float)) else '  - '} "
+                  f"defect={r['defect_types'] or '-':<16} RT={r['rt_result']}")
     elif a.cmd == "anomalies":
         f = {"process": a.process} if a.process else {}
         for r in find_anomalies(a.param, gt=a.gt, lt=a.lt, raw=a.raw, **f):

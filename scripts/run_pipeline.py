@@ -6,10 +6,16 @@
 Each stage is the package CLI owned by another part of the repo (see docs/PLAN.md); this script
 only sequences them, wires paths/env, times them and prints a summary. Examples::
 
-    python scripts/run_pipeline.py                         # everything, auto-detect mosaicod
+    python scripts/run_pipeline.py                         # real data (AIMEN SAW + BAM tandem GMAW), auto-detect mosaicod
     python scripts/run_pipeline.py --offline --replay      # no services, no GPU (CPU rehearsal)
+    python scripts/run_pipeline.py --data-source sim       # the WeldCell simulator instead of real data
+    BAM_WIDS=all AIMEN_COUPONS=PP5 python scripts/run_pipeline.py --only collect
     python scripts/run_pipeline.py --only curate --backend curator-next
     python scripts/run_pipeline.py --from export --dry-run
+
+DATA_SOURCE=real|sim|all (default real, docs/REAL_DATA.md) picks the collect stage: ``real`` runs
+``python -m collect.datasets.fetch`` (REAL_SOURCES, AIMEN_COUPONS, BAM_WIDS), ``sim`` the simulator,
+``all`` both into the same DATA_DIR. Default DATA_DIR: data/real (real, all) or data (sim).
 
 Environment: repo ``.env`` (copy of configs/demo.env.example) is loaded for variables that are not
 already set. Flags win over both.
@@ -49,7 +55,7 @@ def banner(args: argparse.Namespace, env: dict) -> None:
     line = "─" * 78
     print(CYAN(line))
     print(BOLD("  WeldWorld pipeline") + DIM("  · physical AI for pipe-spool & pressure-vessel welding"))
-    print(DIM(f"  data={args.data_dir}  mosaico={'offline' if env.get('MOSAICO_OFFLINE') == '1' else env.get('MOSAICO_HOST', 'localhost') + ':' + env.get('MOSAICO_PORT', '6726')}"
+    print(DIM(f"  source={args.data_source}  data={args.data_dir}  mosaico={'offline' if env.get('MOSAICO_OFFLINE') == '1' else env.get('MOSAICO_HOST', 'localhost') + ':' + env.get('MOSAICO_PORT', '6726')}"
               f"  curate={args.backend}  cosmos={env.get('COSMOS_BACKEND', 'auto')}"))
     print(CYAN(line))
 
@@ -131,7 +137,8 @@ class Stage:
     name: str
     title: str
     module: str                       # first importable candidate is used
-    build: Callable[[argparse.Namespace, str, str], list[str]]   # (args, py, module) -> argv after -m module
+    # (args, py, module) -> argv after -m module, or a list of (module, argv) sub-commands run in order
+    build: Callable[[argparse.Namespace, str, str], list]
     count: Callable[[argparse.Namespace], str]                   # artifact summary after the stage
     alternatives: tuple[str, ...] = ()
     status: str = "pending"
@@ -141,7 +148,25 @@ class Stage:
 
 
 def _n_dirs(p: Path) -> int:
-    return sum(1 for x in p.iterdir() if x.is_dir()) if p.is_dir() else 0
+    return sum(1 for x in p.iterdir() if x.is_dir() and (x / "meta.json").exists()) if p.is_dir() else 0
+
+
+def _n_passes_by_source(p: Path) -> str:
+    if not p.is_dir():
+        return "0 passes"
+    cnt: dict[str, int] = {}
+    for x in p.iterdir():
+        m = x / "meta.json"
+        if not m.exists():
+            continue
+        try:
+            meta = json.loads(m.read_text())
+        except (OSError, ValueError):
+            continue
+        src = meta.get("source")
+        sid = src.get("id") if isinstance(src, dict) else ("weldcell_sim" if meta.get("simulator") else "unknown")
+        cnt[sid] = cnt.get(sid, 0) + 1
+    return f"{sum(cnt.values())} passes" + (f" ({', '.join(f'{k}: {v}' for k, v in sorted(cnt.items()))})" if cnt else "")
 
 
 def _n_files(p: Path, pat: str) -> int:
@@ -153,18 +178,36 @@ def _manifest_stats(p: Path) -> str:
         return "no manifest"
     rows = [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
     kept = sum(1 for r in rows if r.get("kept", True))
-    rej = sum(1 for r in rows if (r.get("rt_result") == "reject"))
-    return f"{len(rows)} clips ({kept} kept, {rej} from RT-rejected welds)"
+    img = sum(1 for r in rows if r.get("media_type") == "image")
+    dfx = sum(1 for r in rows if r.get("defects") or r.get("rt_result") == "reject")
+    return f"{len(rows)} items ({len(rows) - img} clips, {img} photos; {kept} kept, {dfx} with NDT/RT defect labels)"
 
 
 def make_stages(a: argparse.Namespace) -> list[Stage]:
     d = Path(a.data_dir)
     gen, exp, cur = d / "generated", d / "export", d / "curated"
 
-    def b_collect(a, py, m):
+    def b_sim(a, py, m):
         return (["--out", str(gen)]
                 + opt(py, m, a.n_passes, "--n-passes", "--passes", "--num-passes", "--n", "--count")
                 + opt(py, m, a.seed, "--seed"))
+
+    def b_real(a, py, m):
+        argv = ["--sources", a.real_sources, "--data-dir", str(d)]
+        if a.aimen_coupons:
+            argv += opt(py, m, a.aimen_coupons, "--aimen-coupons", "--limit-coupons")
+        if a.bam_wids:
+            argv += opt(py, m, a.bam_wids, "--bam-wids")
+        return argv
+
+    def b_collect(a, py, m):
+        cmds = []
+        # simulator first: it clears existing pass dirs in its --out before writing (DATA_SOURCE=all shares one dir)
+        if a.data_source in ("sim", "all"):
+            cmds.append(("collect.simulate", b_sim(a, py, "collect.simulate")))
+        if a.data_source in ("real", "all"):
+            cmds.append(("collect.datasets.fetch", b_real(a, py, "collect.datasets.fetch")))
+        return cmds
 
     def b_ingest(a, py, m):
         flag = first_flag(py, m, "--input", "--in", "--src")
@@ -174,6 +217,7 @@ def make_stages(a: argparse.Namespace) -> list[Stage]:
     def b_export(a, py, m):
         return (["--out", str(exp)]
                 + opt(py, m, a.clip_s, "--clip-s", "--clip-seconds")
+                + opt(py, m, a.data_source, "--data-source")
                 + (["--offline"] if os.environ.get("MOSAICO_OFFLINE") == "1" and first_flag(py, m, "--offline") else []))
 
     def b_curate(a, py, m):
@@ -182,11 +226,14 @@ def make_stages(a: argparse.Namespace) -> list[Stage]:
     def b_warm(a, py, m):
         # worldmodels.cli warm-cache: Reasoner on kept clips + showcase what-if / sim2real generations
         return ["warm-cache", "--manifest", str(cur / "manifest.jsonl"), "--limit", str(a.warm_limit),
-                "--preset", a.warm_preset]
+                "--photo-limit", str(a.warm_photo_limit), "--preset", a.warm_preset]
 
     return [
-        Stage("collect", "WeldCell simulator -> data/generated", "collect.simulate", b_collect,
-              lambda a: f"{_n_dirs(gen)} passes"),
+        Stage("collect", {"real": f"Fetch + convert real datasets ({a.real_sources}) -> generated/",
+                          "sim": "WeldCell simulator -> generated/",
+                          "all": f"Real datasets ({a.real_sources}) + WeldCell simulator -> generated/"}[a.data_source],
+              "collect.datasets.fetch" if a.data_source != "sim" else "collect.simulate", b_collect,
+              lambda a: _n_passes_by_source(gen)),
         Stage("ingest", "Ingest passes into Mosaico", "mosaico_io.ingest", b_ingest,
               lambda a: f"{_n_dirs(gen)} sequences"),
         Stage("export", "Query + export 5 s clips with sensor sidecars", "mosaico_io.export", b_export,
@@ -198,27 +245,47 @@ def make_stages(a: argparse.Namespace) -> list[Stage]:
     ]
 
 
-def run_stage(i: int, n: int, st: Stage, a: argparse.Namespace, py: str) -> None:
+def _commands(st: Stage, a: argparse.Namespace, py: str) -> tuple[list[list[str]], Optional[str]]:
+    """argv lists for a stage (multi-command stages: collect with DATA_SOURCE=all); error text if a module is missing."""
     mod = next((m for m in (st.module, *st.alternatives) if module_present(m)), None)
+    if mod is None:
+        return [], f"module {st.module} not found"
+    built = st.build(a, py, mod)
+    if built and isinstance(built[0], tuple):
+        cmds = []
+        for m, argv in built:
+            if not module_present(m):
+                return [], f"module {m} not found"
+            cmds.append([py, "-m", m, *argv])
+        return cmds, None
+    return [[py, "-m", mod, *built]], None
+
+
+def run_stage(i: int, n: int, st: Stage, a: argparse.Namespace, py: str) -> None:
     print()
     print(BOLD(f"[{i}/{n}] {st.name.upper():<10}") + " " + st.title)
-    if mod is None:
-        st.status, st.note = "missing", f"module {st.module} not found"
+    cmds, err = _commands(st, a, py)
+    if err:
+        st.status, st.note = "missing", err
         print("  " + YELLOW(f"skip: {st.note}"))
         return
-    argv = [py, "-m", mod, *st.build(a, py, mod)]
-    print(DIM("  $ " + " ".join(shlex.quote(x) for x in argv)))
+    for argv in cmds:
+        print(DIM("  $ " + " ".join(shlex.quote(x) for x in argv)))
     if a.dry_run:
         st.status = "dry-run"
         return
     t0 = time.monotonic()
     env = {**os.environ, **st.extra_env, "PYTHONUNBUFFERED": "1"}
-    proc = subprocess.Popen(argv, cwd=REPO, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1)
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        print(DIM("  │ ") + line.rstrip("\n"))
-    rc = proc.wait()
+    rc = 0
+    for argv in cmds:
+        proc = subprocess.Popen(argv, cwd=REPO, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, bufsize=1)
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            print(DIM("  │ ") + line.rstrip("\n"))
+        rc = proc.wait()
+        if rc != 0:
+            break
     st.seconds = time.monotonic() - t0
     if rc == 0:
         st.status = "ok"
@@ -246,7 +313,16 @@ def summary(stages: list[Stage], total: float) -> None:
 def main(argv: Optional[list[str]] = None) -> int:
     load_dotenv(REPO / ".env")
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--data-dir", default=os.environ.get("DATA_DIR", "data"))
+    p.add_argument("--data-source", default=os.environ.get("DATA_SOURCE", "real"), choices=["real", "sim", "all"],
+                   help="real public datasets (default), the simulator, or both")
+    p.add_argument("--data-dir", default=os.environ.get("DATA_DIR"),
+                   help="default: data/real for real|all, data for sim")
+    p.add_argument("--real-sources", default=os.environ.get("REAL_SOURCES", "aimen_saw,bam_tgmaw"),
+                   help="comma list for collect.datasets.fetch")
+    p.add_argument("--aimen-coupons", default=os.environ.get("AIMEN_COUPONS", ""),
+                   help="AIMEN coupons, e.g. PP5,PP6 (default: all PP3-PP7)")
+    p.add_argument("--bam-wids", default=os.environ.get("BAM_WIDS", "617,630"),
+                   help="BAM workpieces, e.g. 617,630 or all")
     p.add_argument("--n-passes", type=int, default=int(os.environ.get("N_PASSES", 24)))
     p.add_argument("--seed", type=int, default=int(os.environ.get("SIM_SEED", 7)))
     p.add_argument("--clip-s", type=float, default=5.0, help="export clip length (CLIP_SECONDS)")
@@ -258,6 +334,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--no-replace", action="store_true", help="skip sequences that already exist in Mosaico")
     p.add_argument("--warm-limit", type=int, default=int(os.environ.get("WARM_LIMIT", 12)),
                    help="max clips to pre-assess in warm-cache")
+    p.add_argument("--warm-photo-limit", type=int, default=None,
+                   help="max photo items (bead photos) to pre-assess in warm-cache (default WARM_PHOTO_LIMIT or --warm-limit)")
     p.add_argument("--warm-preset", default=os.environ.get("WARM_PRESET", "live"), choices=["smoke", "live", "showcase"],
                    help="generation preset for warm-cache showcase videos")
     sel = p.add_mutually_exclusive_group()
@@ -269,8 +347,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--python", default=sys.executable, help="interpreter for the stage CLIs")
     a = p.parse_args(argv)
 
+    if a.warm_photo_limit is None:
+        a.warm_photo_limit = int(os.environ.get("WARM_PHOTO_LIMIT") or a.warm_limit)
+    if not a.data_dir:
+        a.data_dir = "data" if a.data_source == "sim" else "data/real"
     a.data_dir = str(Path(a.data_dir) if Path(a.data_dir).is_absolute() else (REPO / a.data_dir))
     os.environ["DATA_DIR"] = a.data_dir
+    os.environ["DATA_SOURCE"] = a.data_source
+    os.environ["REAL_SOURCES"] = a.real_sources
+    if a.aimen_coupons:
+        os.environ["AIMEN_COUPONS"] = a.aimen_coupons
+    if a.bam_wids:
+        os.environ["BAM_WIDS"] = a.bam_wids
     if a.offline:
         os.environ["MOSAICO_OFFLINE"] = "1"
     if a.replay:

@@ -22,6 +22,7 @@ async function api(path, opts = {}) {
   if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
   return r.json();
 }
+const kids = (...a) => a.flat(9).filter((x) => x != null && x !== false);
 const md = (t) => DOMPurify.sanitize(marked.parse(t || "", { breaks: false, gfm: true }));
 const fmt = (v, d = 1) => (v == null || Number.isNaN(v) ? "—" : Number(v).toFixed(d));
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -30,21 +31,58 @@ const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private
 
 const SIG = {
   current_a: { n: "Current", u: "A", d: 0 },
+  current2_a: { n: "Current (trail)", u: "A", d: 0 },
   voltage_v: { n: "Voltage", u: "V", d: 1 },
+  voltage2_v: { n: "Voltage (trail)", u: "V", d: 1 },
   travel_speed_mmps: { n: "Travel speed", u: "mm/s", d: 2 },
   gas_lpm: { n: "Shielding gas", u: "L/min", d: 1 },
   heat_input_kj_mm: { n: "Heat input", u: "kJ/mm", d: 2 },
   interpass_c: { n: "Interpass", u: "°C", d: 0 },
   wfs_mpm: { n: "Wire feed", u: "m/min", d: 1 },
+  wfs2_mpm: { n: "Wire feed (trail)", u: "m/min", d: 1 },
 };
 const CHART_PARAMS = ["current_a", "voltage_v", "travel_speed_mmps", "gas_lpm", "heat_input_kj_mm", "interpass_c"];
-const COL = { arc: "#5cc8ff", molten: "#ff8a3d", crit: "#ff5d5d", warn: "#f2b33d", ok: "#3ecf8e", grid: "rgba(255,255,255,0.045)", axis: "#5a6573" };
-const ICON = { reject: "✕", accept: "✓", review: "!", pending: "…" };
+const TRAIL = { current_a: "current2_a", voltage_v: "voltage2_v", wfs_mpm: "wfs2_mpm" };
+const COL = { arc: "#5cc8ff", trail: "#c9a6ff", molten: "#ff8a3d", crit: "#ff5d5d", warn: "#f2b33d", ok: "#3ecf8e", grid: "rgba(255,255,255,0.045)", axis: "#5a6573" };
+const ICON = { reject: "✕", accept: "✓", review: "!", pending: "…", indications: "✕", no_indications: "✓", not_inspected: "–" };
+// NDT indication type colours (strip, timeline, hatching); unknown types get a stable hashed hue
+const DEF_COL = { porosity: "#ff6b6b", lack_of_fusion: "#c792ff", slag_inclusion: "#f2b33d", slag: "#f2b33d", metallic_inclusion: "#4fd1c5", crack: "#ff4fa3",
+  undercut: "#5cc8ff", incomplete_penetration: "#ff9f43", burn_through: "#ff9f43", arc_instability: "#7ee0c3" };
+function defCol(t) {
+  if (DEF_COL[t]) return DEF_COL[t];
+  let hsh = 0; for (const ch of String(t)) hsh = (hsh * 31 + ch.charCodeAt(0)) % 360;
+  return `hsl(${hsh}, 70%, 65%)`;
+}
+const rgba = (hex, a) => { if (!hex.startsWith("#")) return hex.replace("hsl", "hsla").replace(")", `, ${a})`); const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`; };
+const prettyDef = (d) => String(d || "").replace(/_/g, " ");
+// rt_result -> CSS class (colour) and badge text
+const RT_CLASS = { indications: "reject", no_indications: "accept", not_inspected: "pending", reject: "reject", accept: "accept", review: "review" };
+function ndtText(rt, counts) {
+  counts = counts || {};
+  if (rt === "indications") {
+    const top = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+    return top.length ? "NDT: " + top.slice(0, 2).map(([k, v]) => `${prettyDef(k)} ×${v}`).join(", ") + (top.length > 2 ? " …" : "") : "NDT: indications";
+  }
+  if (rt === "no_indications") return "NDT clear";
+  if (rt === "not_inspected") return "Not inspected";
+  if (rt === "accept" || rt === "reject") return `RT ${rt}`;
+  return "RT …";
+}
+function rtBadge(rt, counts, title, short = false) {
+  const k = rt || "pending";
+  const full = ndtText(k, counts);
+  let txt = full;
+  if (short && k === "indications") {
+    const top = Object.entries(counts || {}).sort((a, b) => b[1] - a[1]);
+    txt = top.length ? `${prettyDef(top[0][0]).replace("lack of fusion", "LoF").replace("slag inclusion", "slag")} ×${top[0][1]}${top.length > 1 ? " +" : ""}` : "indications";
+  }
+  return h("span", { class: `badge ${RT_CLASS[k] || "pending"}`, title: title || full }, `${ICON[k] || ""} ${txt}`);
+}
 
 const S = {
   passes: [], seq: null, detail: null, sig: null, view: "torch", win: lsGet("weld.win", "follow"),
-  charts: [], offset: 0, dur: 0, sessionId: null, demo: [], demoDone: new Set(), busy: false,
-  filters: { process: "", spool: "", rt: "", defect: false },
+  charts: [], offset: 0, dur: 0, sessionId: null, demo: [], demoDone: new Set(), busy: false, data: null,
+  filters: { source: "", defectType: "", rt: "", defect: false },
 };
 
 /* ===================================================================== tabs */
@@ -86,64 +124,100 @@ function pulseStage(id, ms = 2500) {
 }
 
 /* ===================================================================== shop floor */
+const isReal = () => !!S.data?.real;
+const srcKey = (p) => (p.synthetic ? "sim" : p.source_id || "unknown");
+const SRC_LABEL = { aimen_saw: "AIMEN SAW", bam_tgmaw: "BAM tandem-GMAW", sim: "Simulated" };
 async function loadPasses() {
   const r = await api("/api/passes");
   S.passes = r.passes;
-  const cells = [...new Set(S.passes.map((p) => p.cell_id).filter(Boolean))];
-  $("#floorSource").textContent = `${cells.join(", ") || "Cell"} · ${r.source === "mosaico_io" ? "via mosaico_io" : "local files"}`;
-  const procs = [...new Set(S.passes.map((p) => p.process).filter(Boolean))].sort();
-  $("#fProcess").innerHTML = "";
-  ["", ...procs].forEach((v) => $("#fProcess").append(h("button", { "data-v": v, class: v === S.filters.process ? "on" : "" }, v || "All")));
-  const spools = [...new Set(S.passes.map((p) => p.spool_id))].sort();
-  const sel = $("#fSpool");
-  sel.innerHTML = '<option value="">All spools</option>' + spools.map((s) => `<option>${esc(s)}</option>`).join("");
-  sel.value = S.filters.spool;
+  S.data = r.data || S.data;
+  const real = isReal();
+  $("#floorSource").textContent = real ? `${(S.data.short || []).join(" + ")} · ${r.source === "mosaico_io" ? "via mosaico_io" : "local files"}`
+    : `${[...new Set(S.passes.map((p) => p.cell_id).filter(Boolean))].join(", ") || "Cell"} · ${r.source === "mosaico_io" ? "via mosaico_io" : "local files"}`;
+  const srcs = [...new Set(S.passes.map(srcKey))];
+  $("#fSource").innerHTML = "";
+  const SHORT = { aimen_saw: "AIMEN", bam_tgmaw: "BAM", sim: "Sim" };
+  if (srcs.length > 1) ["", ...srcs].forEach((v) => $("#fSource").append(h("button", { "data-v": v, class: v === S.filters.source ? "on" : "",
+    title: v ? `Only ${SRC_LABEL[v] || v}` : "All datasets" }, v ? (SHORT[v] || v) : "All")));
+  $("#fSource").classList.toggle("hidden", srcs.length < 2);
+  const types = [...new Set(S.passes.flatMap((p) => Object.keys(p.defect_counts || {}).concat(p.defect_types || [])))].sort();
+  $("#fDefectType").innerHTML = '<option value="">All defect types</option>' + types.map((t) => `<option value="${esc(t)}">${esc(prettyDef(t))}</option>`).join("");
+  $("#fDefectType").value = S.filters.defectType;
+  const rts = [...new Set(S.passes.map((p) => p.rt_result || "pending"))];
+  const RT_OPT = { indications: "NDT indications", no_indications: "NDT clear", not_inspected: "Not inspected", reject: "RT reject", accept: "RT accept", pending: "RT pending" };
+  $("#fRt").innerHTML = `<option value="">${real ? "NDT: any" : "RT: any"}</option>` + Object.keys(RT_OPT).filter((k) => rts.includes(k)).map((k) => `<option value="${k}">${RT_OPT[k]}</option>`).join("");
+  $("#fRt").value = S.filters.rt;
+  $("#fDefectLbl").textContent = real ? "NDT indications / excursions only" : "Defects / WPS breaks only";
   renderFloor();
 }
-function rtClass(p) { return p.rt_result || "pending"; }
+function rtClass(p) { return RT_CLASS[p.rt_result] || "pending"; }
+function passLabel(p) { return p.pass_label || `P${p.pass_no}`; }
 function renderFloor() {
   const f = S.filters;
-  const rows = S.passes.filter((p) => (!f.process || p.process === f.process) && (!f.spool || p.spool_id === f.spool)
-    && (!f.rt || rtClass(p) === f.rt) && (!f.defect || p.has_defect || p.violation_count));
+  const rows = S.passes.filter((p) => (!f.source || srcKey(p) === f.source)
+    && (!f.defectType || (p.defect_counts || {})[f.defectType] || (p.defect_types || []).includes(f.defectType))
+    && (!f.rt || (p.rt_result || "pending") === f.rt) && (!f.defect || p.has_defect || p.violation_count));
   const all = S.passes;
+  const real = isReal();
   $("#floorKpis").innerHTML = "";
   $("#floorKpis").append(
     h("div", { class: "kpi" }, h("div", { class: "v" }, all.length), h("div", { class: "l" }, "Passes")),
-    h("div", { class: "kpi crit" }, h("div", { class: "v" }, all.filter((p) => p.rt_result === "reject").length), h("div", { class: "l" }, "RT reject")),
-    h("div", { class: "kpi warn" }, h("div", { class: "v" }, all.filter((p) => p.violation_count).length), h("div", { class: "l" }, "WPS breaks")));
+    real ? h("div", { class: "kpi crit", title: "Passes where RT/UT found indications" }, h("div", { class: "v" }, all.filter((p) => p.rt_result === "indications").length), h("div", { class: "l" }, "NDT indic."))
+      : h("div", { class: "kpi crit" }, h("div", { class: "v" }, all.filter((p) => p.rt_result === "reject").length), h("div", { class: "l" }, "RT reject")),
+    h("div", { class: "kpi warn", title: real ? "Passes outside the published-settings window" : "" }, h("div", { class: "v" }, all.filter((p) => p.violation_count).length),
+      h("div", { class: "l" }, real ? "Off settings" : "WPS breaks")));
   const list = $("#passList");
   list.innerHTML = "";
-  const bySpool = {};
-  rows.forEach((p) => ((bySpool[p.spool_id] ||= {})[p.joint_id] ||= []).push(p));
-  for (const sp of Object.keys(bySpool).sort()) {
-    const joints = bySpool[sp];
-    const nrej = Object.values(joints).flat().filter((p) => p.rt_result === "reject").length;
-    const box = h("div", { class: "spool" }, h("div", { class: "spool-h" }, h("span", {}, `SPOOL ${sp}`),
-      nrej ? h("span", { class: "badge reject" }, `${nrej} rej`) : h("span", { class: "badge accept" }, "clean")));
-    for (const j of Object.keys(joints).sort()) {
-      const jb = h("div", { class: "joint" }, h("div", { class: "joint-h" }, `${j}`, h("span", { class: "sub" }, joints[j][0].position || "")));
-      for (const p of joints[j].sort((a, b) => a.pass_no - b.pass_no)) {
-        jb.append(h("div", { class: `prow ${rtClass(p)} ${p.sequence_name === S.seq ? "active" : ""}`, "data-seq": p.sequence_name,
-          onclick: () => selectPass(p.sequence_name) },
+  // source -> coupon/workpiece (spool) -> pass
+  const tree = {};
+  rows.forEach((p) => (((tree[srcKey(p)] ||= {})[p.spool_id] ||= []).push(p)));
+  const order = Object.keys(tree).sort((a, b) => (a === "sim") - (b === "sim") || a.localeCompare(b));
+  for (const sk of order) {
+    const coupons = tree[sk];
+    const first = Object.values(coupons)[0][0];
+    const sim = sk === "sim";
+    if (order.length > 1 || real) list.append(h("div", { class: `src-h ${sim ? "sim" : ""}` },
+      h("span", { class: "nm" }, sim ? "WeldCell simulator" : (first.source_short || SRC_LABEL[sk] || sk)),
+      sim ? h("span", { class: "badge molten", title: "Synthetic data — not a real weld" }, "SIMULATED")
+        : h("span", { class: "lic", title: "Licence — see Data & credits" }, first.license || "")));
+    for (const sp of Object.keys(coupons).sort()) {
+      const ps = coupons[sp].sort((a, b) => a.pass_no - b.pass_no);
+      const nInd = ps.filter((p) => p.rt_result === "indications" || p.rt_result === "reject").length;
+      const inspected = ps.filter((p) => p.ndt_inspected).length;
+      const kind = sk === "aimen_saw" ? "COUPON" : sk === "bam_tgmaw" ? "WORKPIECE" : "SPOOL";
+      const sum = !inspected ? h("span", { class: "badge pending", title: "No NDT on this " + kind.toLowerCase() }, "not inspected")
+        : nInd ? h("span", { class: "badge reject" }, `${nInd}/${inspected} ${real ? "w/ indic." : "rej"}`) : h("span", { class: "badge accept" }, "clean");
+      const box = h("div", { class: "spool" }, h("div", { class: "spool-h" },
+        h("span", {}, `${kind} ${sp}`, h("small", {}, [first.material, first.thickness_mm ? `${first.thickness_mm} mm` : null].filter(Boolean).join(" · "))), sum));
+      const jb = h("div", { class: "joint" });
+      let lastJoint = null;
+      for (const p of ps) {
+        if (!real && p.joint_id !== lastJoint) { jb.append(h("div", { class: "joint-h" }, `${p.joint_id}`, h("span", { class: "sub" }, p.position || ""))); lastJoint = p.joint_id; }
+        const counts = Object.entries(p.defect_counts || {});
+        jb.append(h("div", { class: `prow ${rtClass(p)} ${p.sequence_name === S.seq ? "active" : ""} ${p.synthetic ? "sim" : ""}`, "data-seq": p.sequence_name,
+          onclick: () => selectPass(p.sequence_name), title: p.sequence_name },
           h("div", { class: "stripe" }),
-          h("div", {}, h("div", { class: "nm" }, `P${p.pass_no} ${p.pass_type}`, h("small", {}, p.process)),
+          h("div", {}, h("div", { class: "nm" }, `${passLabel(p)} ${p.pass_type || ""}`, h("small", {}, p.process),
+              p.synthetic && real ? h("span", { class: "simtag" }, "SIMULATED") : null),
             h("div", { class: "meta" }, h("span", {}, `${fmt(p.duration_s, 0)} s`),
-              p.defect_types.length ? h("span", { style: { color: "#ff9c9c" } }, p.defect_types.map((d) => d.replace(/_/g, " ")).join(", ")) : null)),
-          h("div", { class: "tags" }, p.violation_count ? h("span", { class: "vtag", title: (p.violated_params || []).join(", ") }, `⚠ ${p.violation_count}`) : null,
-            h("span", { class: `badge ${rtClass(p)}` }, `${ICON[rtClass(p)]} ${rtClass(p) === "pending" ? "RT …" : "RT"}`))));
+              p.has_video ? h("span", { class: "mi", title: "Process video" }, "▶ video") : null,
+              p.has_photo ? h("span", { class: "mi", title: "Bead photo" }, "◩ photo") : null,
+              !real && counts.length ? h("span", { style: { color: "#ff9c9c" } }, counts.map(([d]) => prettyDef(d)).join(", ")) : null)),
+          h("div", { class: "tags" }, p.violation_count ? h("span", { class: "vtag", title: `Outside ${real ? "published settings" : "WPS"}: ${(p.violated_params || []).join(", ")}` }, `⚠ ${p.violation_count}`) : null,
+            real ? rtBadge(p.rt_result, p.defect_counts, null, true) : h("span", { class: `badge ${rtClass(p)}` }, `${ICON[rtClass(p)]} ${rtClass(p) === "pending" ? "RT …" : "RT"}`))));
       }
       box.append(jb);
+      list.append(box);
     }
-    list.append(box);
   }
-  if (!rows.length) list.append(h("div", { class: "placeholder" }, S.passes.length ? "No passes match" : "No passes yet — run the simulator or COPILOT_FIXTURES=1"));
+  if (!rows.length) list.append(h("div", { class: "placeholder" }, S.passes.length ? "No passes match" : "No passes yet — run the pipeline, or COPILOT_FIXTURES=real / =1"));
 }
-$("#fProcess").addEventListener("click", (e) => {
+$("#fSource").addEventListener("click", (e) => {
   if (e.target.tagName !== "BUTTON") return;
-  $$("#fProcess button").forEach((b) => b.classList.toggle("on", b === e.target));
-  S.filters.process = e.target.dataset.v; renderFloor();
+  $$("#fSource button").forEach((b) => b.classList.toggle("on", b === e.target));
+  S.filters.source = e.target.dataset.v; renderFloor();
 });
-$("#fSpool").onchange = (e) => { S.filters.spool = e.target.value; renderFloor(); };
+$("#fDefectType").onchange = (e) => { S.filters.defectType = e.target.value; renderFloor(); };
 $("#fRt").onchange = (e) => { S.filters.rt = e.target.value; renderFloor(); };
 $("#fDefect").onchange = (e) => { S.filters.defect = e.target.checked; renderFloor(); };
 
@@ -157,26 +231,73 @@ async function selectPass(seq, t = null, view = null) {
     const [detail, sig] = await Promise.all([api(`/api/passes/${encodeURIComponent(seq)}`), api(`/api/passes/${encodeURIComponent(seq)}/signals?hz=25`)]);
     S.detail = detail; S.sig = sig; S.dur = sig.t.length ? sig.t[sig.t.length - 1] : (detail.pass.duration_s || 0);
     renderReplayHead();
+    renderViewToggle();
     buildCharts();
     renderTimeline();
-    setView(view || (S.view === "sim2real" && !detail.sim2real ? "torch" : S.view), true);
+    const views = availableViews();
+    const keep = views.includes(S.view) && !(S.view === "sim2real" && !detail.sim2real) ? S.view : views[0];
+    setView(view && views.includes(view) ? view : keep, true);
     $(`.prow[data-seq="${CSS.escape(seq)}"]`)?.scrollIntoView({ block: "nearest" });
   } else if (view) setView(view);
   if (t != null) seek(t);
 }
 
+function availableViews() {
+  const m = S.detail?.media || {}, synth = !!S.detail?.source?.synthetic;
+  const v = [];
+  if (m.torch) v.push("torch");
+  if (m.photos?.length) v.push("photo");
+  if (m.edge) v.push("edge");
+  if (m.depth) v.push("depth");
+  if (synth && m.edge) v.push("sim2real");
+  if (!v.length) v.push("torch");
+  return v;
+}
+function renderViewToggle() {
+  const m = S.detail.media || {};
+  const real = m.video?.real;
+  const lbl = { torch: real ? "Process cam" : "Torch cam", photo: `Bead photo${m.photos?.length > 1 ? "s" : ""}`, edge: "Edge", depth: "Depth", sim2real: "Sim → Real" };
+  const box = $("#viewToggle");
+  box.innerHTML = "";
+  const views = availableViews();
+  views.forEach((v) => box.append(h("button", { "data-view": v, class: `${v === "sim2real" ? "s2r" : ""} ${v === S.view ? "on" : ""}`,
+    title: v === "edge" && real ? "Canny edges of the real video (Cosmos Transfer control)" : null }, lbl[v])));
+  box.classList.toggle("hidden", views.length < 2 && !m.torch && !m.photos);
+}
+
 function renderReplayHead() {
-  const d = S.detail, p = d.pass || {}, m = d.meta || {};
+  const d = S.detail, p = d.pass || {}, m = d.meta || {}, src = d.source || {};
+  const real = !src.synthetic;
   $("#seqTitle").textContent = d.sequence_name;
   const chips = $("#seqChips");
   chips.innerHTML = "";
-  chips.append(
-    h("span", { class: `badge ${p.rt_result || "pending"}` }, `${ICON[p.rt_result || "pending"]} RT ${p.rt_result || "pending"}`),
-    h("span", { class: "chip" }, `${p.process} · ${p.pass_type} · P${p.pass_no}`),
-    h("span", { class: "chip" }, m.wps_id || p.wps_id),
-    h("span", { class: "chip" }, `${m.position || p.position} · ${m.material || p.material}`),
+  const nv = d.violations.length;
+  const basis = d.wps_basis || (real ? "" : "WPS from the shop's procedure library (simulated)");
+  chips.append(...kids(
+    real ? rtBadge(p.rt_result, p.defect_counts, (d.ndt?.methods || []).length ? `NDT: ${(d.ndt.methods || []).join(" + ")}${(d.ndt.report_files || []).length ? ` (${d.ndt.report_files.join(", ")})` : ""}` : "This pass was not NDT-inspected")
+      : h("span", { class: `badge ${p.rt_result || "pending"}` }, `${ICON[p.rt_result || "pending"]} RT ${p.rt_result || "pending"}`),
+    src.synthetic && S.data?.real ? h("span", { class: "badge molten", title: "Synthetic pass from the WeldCell simulator" }, "SIMULATED") : null,
+    h("span", { class: "chip" }, `${p.process} · ${p.pass_type} · ${passLabel(p)}`),
+    real ? h("span", { class: "chip" }, `${m.material || p.material}${m.thickness_mm ? ` · ${m.thickness_mm} mm` : ""}`)
+      : h("span", { class: "chip" }, m.wps_id || p.wps_id),
+    real ? null : h("span", { class: "chip" }, `${m.position || p.position} · ${m.material || p.material}`),
     m.pipe_od_mm ? h("span", { class: "chip" }, `Ø${m.pipe_od_mm} × ${m.wall_mm} mm`) : null,
-    d.violations.length ? h("span", { class: "badge warn" }, `⚠ ${d.violations.length} WPS violation${d.violations.length > 1 ? "s" : ""}`) : h("span", { class: "badge ok" }, "✓ within WPS"));
+    (m.electrodes || 1) > 1 ? h("span", { class: "chip", title: "Two wires: lead + trail electrode" }, "tandem · lead + trail") : null,
+    String(m.process).toUpperCase() === "SAW" ? h("span", { class: "chip", title: "Submerged arc: the arc is covered by granular flux — no shielding gas" }, "flux-shielded") : null,
+    nv ? h("span", { class: "badge warn", title: basis }, `⚠ ${nv} ${real ? "outside published settings" : `WPS violation${nv > 1 ? "s" : ""}`}`)
+      : h("span", { class: "badge ok", title: basis }, real ? "✓ within published settings" : "✓ within WPS")));
+  const prov = $("#seqProv");
+  prov.innerHTML = "";
+  if (src.synthetic) {
+    prov.append(h("span", { class: "sim" }, "SIMULATED"), " WeldCell simulator — synthetic pass, not a real weld");
+  } else {
+    prov.append(...kids(h("span", { class: "k" }, "Data"), h("b", {}, src.org ? `${src.short}` : src.title || src.id), " · ",
+      h("span", { title: src.authors || "" }, src.title || ""), " · ",
+      h("span", { class: "lic" }, src.license || "licence?"),
+      src.doi ? [" · ", h("a", { href: `https://doi.org/${src.doi}`, target: "_blank", rel: "noopener" }, `DOI ${src.doi}`)] : null,
+      " · ", h("a", { href: "#", onclick: (e) => { e.preventDefault(); openCredits(src.id); } }, "credits"),
+      m.fixture ? h("span", { class: "fx", title: "copilot/fixtures_real.py stand-in until the real conversion lands" }, "FIXTURE") : null));
+  }
 }
 
 function setView(view, force = false) {
@@ -190,10 +311,15 @@ function setView(view, force = false) {
   $("#s2rEmpty").classList.add("hidden");
   $(".vid.second").classList.add("hidden");
   stage.classList.remove("split");
+  stage.classList.toggle("photo-on", view === "photo");
+  $("#photoView").classList.toggle("hidden", view !== "photo");
   vSecond.removeAttribute("src");
   S.offset = 0;
-  let src = media[view === "sim2real" ? "torch" : view];
-  $("#capMain").textContent = { torch: "TORCH CAM · SIMULATOR", edge: "CONTROL · EDGE", depth: "CONTROL · DEPTH", sim2real: "SIMULATOR" }[view];
+  let src = view === "photo" ? null : media[view === "sim2real" ? "torch" : view];
+  const vcap = media.video?.caption || "TORCH CAM · SIMULATOR";
+  $("#capMain").textContent = { torch: vcap, edge: media.video?.real ? "CONTROL · EDGE (from the real video)" : "CONTROL · EDGE", depth: "CONTROL · DEPTH", sim2real: "SIMULATOR" }[view] || "";
+  $("#capMain").classList.toggle("real", !!media.video?.real && (view === "torch" || view === "edge"));
+  if (view === "photo") renderPhotoView();
   if (view === "sim2real") {
     const s2r = S.detail.sim2real;
     if (!s2r) { $("#s2rEmpty").classList.remove("hidden"); }
@@ -209,19 +335,68 @@ function setView(view, force = false) {
       vMain.loop = vSecond.loop = true;
     }
   } else vMain.loop = false;
-  stage.classList.toggle("hud-on", !stage.classList.contains("split"));
-  $("#stageEmpty").classList.toggle("hidden", !!src);
+  stage.classList.toggle("hud-on", !stage.classList.contains("split") && view !== "photo");
+  $("#stageEmpty").classList.toggle("hidden", !!src || view === "photo");
+  $("#stageEmpty").textContent = media.photos?.length ? "No video for this pass — see the bead photo" : "No camera video for this pass — signals-only replay";
   if (src) {
     if (vMain.getAttribute("src") !== src) { vMain.src = src; vMain.load(); }
     S.pendingSeek = null;
     vMain.addEventListener("loadedmetadata", () => seek(Math.max(S.pendingSeek ?? t, S.offset)), { once: true });
-  } else { vMain.removeAttribute("src"); vMain.load(); S.vt = t; tick(true); }
+  } else { if (vMain.getAttribute("src")) { vMain.pause(); vMain.removeAttribute("src"); vMain.load(); } S.vt = t; tick(true); }
 }
-$("#viewToggle").addEventListener("click", (e) => { if (e.target.dataset.view) setView(e.target.dataset.view); });
+$("#viewToggle").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b?.dataset.view) setView(b.dataset.view); });
 $("#s2rGo").onclick = () => {
   if (!S.seq) return;
   sendChat(`Make photoreal training video from the simulator for ${S.seq}`);
 };
+
+/* photo viewer: thumbnails, wheel zoom about the cursor, drag to pan, double-click to fit */
+const PV = { i: 0, z: 1, x: 0, y: 0, fit: 1, drag: null };
+function renderPhotoView() {
+  const m = S.detail.media || {}, photos = m.photos || [];
+  if (PV.seq !== S.seq) { PV.seq = S.seq; PV.i = 0; }
+  const th = $("#pvThumbs");
+  th.innerHTML = "";
+  photos.forEach((ph, i) => th.append(h("button", { class: `pv-th ${i === PV.i ? "on" : ""}`, title: ph.name, onclick: () => { PV.i = i; renderPhotoView(); } },
+    h("img", { src: ph.url, alt: ph.name, loading: "lazy" }))));
+  th.classList.toggle("single", photos.length < 2);
+  $("#pvCap").textContent = `${m.photo_caption || "Bead photo"}${photos.length > 1 ? ` · ${PV.i + 1}/${photos.length}` : ""}`;
+  const p = S.detail.pass || {}, nd = S.detail.ndt || {};
+  const n = (nd.indications || []).length;
+  $("#pvNdt").innerHTML = "";
+  $("#pvNdt").append(rtBadge(p.rt_result, p.defect_counts),
+    n ? h("span", { class: "pv-note" }, `${(nd.methods || []).join("/")} indications are internal — usually not visible on the bead surface`) : null);
+  const img = $("#pvImg");
+  if (!photos.length) { img.removeAttribute("src"); return; }
+  if (img.getAttribute("src") !== photos[PV.i].url) { img.onload = () => pvFit(); img.src = photos[PV.i].url; }
+  else pvFit();
+}
+function pvApply() {
+  const img = $("#pvImg");
+  img.style.transform = `translate(${PV.x}px, ${PV.y}px) scale(${PV.z})`;
+  $("#pvZoom").textContent = Math.abs(PV.z - PV.fit) < 1e-3 ? "fit" : `${Math.round((PV.z / PV.fit) * 100)}%`;
+}
+function pvFit() {
+  const box = $("#pvMain"), img = $("#pvImg");
+  if (!img.naturalWidth) return;
+  PV.fit = Math.min(box.clientWidth / img.naturalWidth, box.clientHeight / img.naturalHeight);
+  PV.z = PV.fit; PV.x = (box.clientWidth - img.naturalWidth * PV.z) / 2; PV.y = (box.clientHeight - img.naturalHeight * PV.z) / 2;
+  pvApply();
+}
+function pvZoomAt(f, cx, cy) {
+  const z = Math.max(PV.fit, Math.min(PV.fit * 12, PV.z * f));
+  PV.x = cx - ((cx - PV.x) * z) / PV.z; PV.y = cy - ((cy - PV.y) * z) / PV.z; PV.z = z;
+  if (Math.abs(z - PV.fit) < 1e-6) return pvFit();
+  pvApply();
+}
+$("#pvMain").addEventListener("wheel", (e) => { e.preventDefault(); const r = e.currentTarget.getBoundingClientRect(); pvZoomAt(e.deltaY < 0 ? 1.2 : 1 / 1.2, e.clientX - r.left, e.clientY - r.top); }, { passive: false });
+$("#pvMain").addEventListener("mousedown", (e) => { PV.drag = { x: e.clientX - PV.x, y: e.clientY - PV.y }; e.currentTarget.classList.add("grab"); });
+window.addEventListener("mousemove", (e) => { if (PV.drag) { PV.x = e.clientX - PV.drag.x; PV.y = e.clientY - PV.drag.y; pvApply(); } });
+window.addEventListener("mouseup", () => { PV.drag = null; $("#pvMain").classList.remove("grab"); });
+$("#pvMain").addEventListener("dblclick", (e) => { const r = e.currentTarget.getBoundingClientRect(); if (PV.z > PV.fit * 1.01) pvFit(); else pvZoomAt(3, e.clientX - r.left, e.clientY - r.top); });
+$("#pvIn").onclick = () => { const b = $("#pvMain"); pvZoomAt(1.4, b.clientWidth / 2, b.clientHeight / 2); };
+$("#pvOut").onclick = () => { const b = $("#pvMain"); pvZoomAt(1 / 1.4, b.clientWidth / 2, b.clientHeight / 2); };
+$("#pvFit").onclick = pvFit;
 
 // virtual clock when a pass has no video (signals-only replay)
 S.vt = 0; S.vplay = false; S.vlast = 0;
@@ -272,8 +447,17 @@ function renderTimeline() {
   const marks = $("#tlMarks");
   marks.innerHTML = "";
   const d = S.dur || 1;
-  (S.detail.defect_windows || []).forEach((w) => marks.append(h("div", { class: "tl-mark defect", title: `${w.defect} ${fmt(w.t_start)}–${fmt(w.t_end)} s`,
-    style: { left: `${(w.t_start / d) * 100}%`, width: `${Math.max(0.6, ((w.t_end - w.t_start) / d) * 100)}%` } }, h("span", { class: "lbl" }, w.defect.replace(/_/g, " ")))));
+  const wins = S.detail.defect_windows || [];
+  const labelled = new Set();
+  wins.forEach((w) => {
+    const c = defCol(w.defect);
+    const first = !labelled.has(w.defect); labelled.add(w.defect);
+    const n = wins.filter((x) => x.defect === w.defect).length;
+    marks.append(h("div", { class: "tl-mark defect", title: `${prettyDef(w.defect)} ${fmt(w.t_start)}–${fmt(w.t_end)} s${w.x_start_mm != null ? ` · x ${w.x_start_mm}–${w.x_end_mm} mm` : ""}`,
+      style: { left: `${(w.t_start / d) * 100}%`, width: `${Math.max(0.5, ((w.t_end - w.t_start) / d) * 100)}%`,
+        background: `repeating-linear-gradient(135deg, ${rgba(c, 0.9)} 0 3px, ${rgba(c, 0.5)} 3px 6px)` } },
+      first ? h("span", { class: "lbl", style: { color: c } }, `${prettyDef(w.defect)}${n > 1 ? ` ×${n}` : ""}`) : null));
+  });
   (S.detail.violations || []).forEach((v) => marks.append(h("div", { class: "tl-mark viol", title: `${v.param} ${v.value} (WPS ${v.limit_lo ?? ""}–${v.limit_hi ?? ""})`,
     style: { left: `${(v.t_start_s / d) * 100}%`, width: `${Math.max(0.6, ((v.t_end_s - v.t_start_s) / d) * 100)}%` } })));
 }
@@ -304,9 +488,10 @@ function bandHook(param, lim, windows, viol) {
     ctx.beginPath(); ctx.rect(bbox.left, bbox.top, bbox.width, bbox.height); ctx.clip();
     // defect windows (hatched, all charts)
     for (const w of windows) {
-      const x0 = u.valToPos(w.t_start, "x", true), x1 = u.valToPos(w.t_end, "x", true);
-      ctx.fillStyle = "rgba(255,93,93,0.08)"; ctx.fillRect(x0, bbox.top, x1 - x0, bbox.height);
-      ctx.strokeStyle = "rgba(255,93,93,0.12)"; ctx.lineWidth = 1;
+      const x0 = u.valToPos(w.t_start, "x", true), x1 = Math.max(u.valToPos(w.t_end, "x", true), x0 + 2 * devicePixelRatio);
+      const c = defCol(w.defect);
+      ctx.fillStyle = rgba(c, 0.1); ctx.fillRect(x0, bbox.top, x1 - x0, bbox.height);
+      ctx.strokeStyle = rgba(c, 0.14); ctx.lineWidth = 1;
       for (let x = x0 - bbox.height; x < x1; x += 7 * devicePixelRatio) { ctx.beginPath(); ctx.moveTo(Math.max(x, x0), bbox.top + bbox.height - Math.max(0, x0 - x)); ctx.lineTo(Math.min(x + bbox.height, x1), bbox.top + Math.max(0, x + bbox.height - x1)); ctx.stroke(); }
     }
     // WPS band
@@ -337,56 +522,127 @@ function playheadHook(u) {
   ctx.beginPath(); ctx.moveTo(x, bbox.top); ctx.lineTo(x, bbox.top + bbox.height); ctx.stroke();
   ctx.restore();
 }
+function chartParams() {
+  const sig = S.sig;
+  return CHART_PARAMS.filter((p) => sig.series[p]);
+}
 function buildCharts() {
   S.charts.forEach((c) => c.u.destroy());
   S.charts = [];
   const box = $("#charts");
   box.innerHTML = "";
   const sig = S.sig, wps = sig.wps || {};
-  const params = CHART_PARAMS.filter((p) => sig.series[p]);
-  const avail = box.clientHeight - 30;
-  const height = Math.max(46, Math.floor(avail / params.length) - 1);
+  const params = chartParams();
+  const notes = Object.entries(sig.notes || {}).filter(([p]) => CHART_PARAMS.includes(p));
+  const wins = S.detail.defect_windows || [];
+  const strip = wins.length > 0 || (S.detail.ndt && S.detail.ndt.inspected !== undefined && !S.detail.source?.synthetic);
+  const stripH = strip ? 22 : 0;
+  const avail = box.clientHeight - 30 - notes.length * 19 - stripH;
+  const height = Math.max(40, Math.floor(avail / Math.max(params.length, 1)) - 1);
   const sync = uPlot.sync("weld");
+  const basis = sig.wps_basis || S.detail.wps_basis;
   params.forEach((p, i) => {
-    const last = i === params.length - 1;
+    const last = i === params.length - 1 && !strip;
     const lim = wps[p];
+    const trail = TRAIL[p] && sig.series[TRAIL[p]] ? TRAIL[p] : null;
     const viol = (S.detail.violations || []).filter((v) => v.param === p);
+    const limTxt = lim ? (lim[0] == null ? `≤ ${lim[1]}` : `${fmt(lim[0], SIG[p].d)}–${fmt(lim[1], SIG[p].d)}`) : "";
     const row = h("div", { class: `chart-row ${viol.length ? "bad" : ""}` },
-      h("div", { class: "chart-lbl" }, h("div", { class: "n" }, SIG[p].n),
+      h("div", { class: "chart-lbl" }, h("div", { class: "n" }, SIG[p].n,
+          trail ? h("span", { class: "leg", title: "blue = lead electrode, violet = trail electrode" }, h("i", { class: "l" }), h("i", { class: "t" }), "L/T") : null),
         h("div", { class: "val", id: `val-${p}` }, "—"),
-        h("div", { class: "lim" }, lim ? (lim[0] == null ? `WPS ≤ ${lim[1]}` : `WPS ${lim[0]}–${lim[1]}`) : "")),
+        lim ? h("div", { class: "lim", title: basis ? `WPS basis: ${basis}` : "WPS limits" }, `${basis ? "WPS*" : "WPS"} ${limTxt}`) : null),
       h("div", { class: "chart-box" }));
     box.append(row);
     const el = row.querySelector(".chart-box");
     const data = [sig.t, sig.series[p], outOfSpec(sig.series[p], lim)];
-    const yr = yRange(sig.series[p], lim);
-    const opts = {
-      width: Math.max(100, el.clientWidth), height: height + (last ? 18 : 0),
-      padding: [4, 6, 0, 0],
-      cursor: { sync: { key: sync.key }, drag: { x: false, y: false }, points: { show: false }, y: false },
-      legend: { show: false },
-      scales: { x: { time: false, auto: false, min: 0, max: S.dur }, y: { range: () => yr } },
-      axes: [
-        { show: last, stroke: COL.axis, size: 18, gap: 2, grid: { stroke: COL.grid, width: 1 }, ticks: { show: false }, font: "10px IBM Plex Mono", values: (u, v) => v.map((x) => `${x}s`) },
-        { stroke: COL.axis, size: 40, gap: 3, grid: { stroke: COL.grid, width: 1 }, ticks: { show: false }, font: "10px IBM Plex Mono", splits: (u) => { const [a, b] = u.scales.y.range ? [u.scales.y.min, u.scales.y.max] : [0, 1]; return [a + (b - a) * 0.2, a + (b - a) * 0.8]; }, values: (u, v) => v.map((x) => fmt(x, SIG[p].d)) },
-      ],
-      series: [{}, { stroke: COL.arc, width: 1.5, spanGaps: true }, { stroke: COL.crit, width: 2.4, spanGaps: false }],
-      hooks: { drawClear: [bandHook(p, lim, S.detail.defect_windows || [], viol)], draw: [playheadHook],
-        setCursor: [(u) => showVal(p, u.cursor.idx)] },
-    };
-    const u = new uPlot(opts, data, el);
+    const series = [{}, { stroke: COL.arc, width: 1.5, spanGaps: true }, { stroke: COL.crit, width: 2.4, spanGaps: false }];
+    if (trail) { data.push(sig.series[trail]); series.push({ stroke: COL.trail, width: 1.2, spanGaps: true }); }
+    const yr = yRange(trail ? sig.series[p].concat(sig.series[trail]) : sig.series[p], lim);
+    const u = new uPlot(chartOpts(p, el, last, height, yr, series, sync, [bandHook(p, lim, wins, viol)], (u) => showVal(p, u.cursor.idx)), data, el);
     u.over.addEventListener("click", (e) => seek(u.posToVal(e.offsetX, "x")));
     u.over.addEventListener("mouseleave", () => showVal(p, null));
-    S.charts.push({ p, u, el, lim });
+    S.charts.push({ p, u, el, lim, trail });
   });
+  for (const [p, note] of notes) {
+    box.append(h("div", { class: "chart-note" }, h("span", { class: "n" }, SIG[p]?.n || p), h("span", {}, note)));
+  }
+  if (strip) buildNdtStrip(box, sync, stripH);
   S.lastT = null;
   tick(true);
+}
+function chartOpts(p, el, last, height, yr, series, sync, drawClear, setCursor) {
+  return {
+    width: Math.max(100, el.clientWidth), height: height + (last ? 18 : 0),
+    padding: [4, 6, 0, 0],
+    cursor: { sync: { key: sync.key }, drag: { x: false, y: false }, points: { show: false }, y: false },
+    legend: { show: false },
+    scales: { x: { time: false, auto: false, min: 0, max: S.dur }, y: { range: () => yr } },
+    axes: [
+      { show: last, stroke: COL.axis, size: 18, gap: 2, grid: { stroke: COL.grid, width: 1 }, ticks: { show: false }, font: "10px IBM Plex Mono", values: (u, v) => v.map((x) => `${x}s`) },
+      p ? { stroke: COL.axis, size: 40, gap: 3, grid: { stroke: COL.grid, width: 1 }, ticks: { show: false }, font: "10px IBM Plex Mono", splits: (u) => { const [a, b] = u.scales.y.range ? [u.scales.y.min, u.scales.y.max] : [0, 1]; return [a + (b - a) * 0.2, a + (b - a) * 0.8]; }, values: (u, v) => v.map((x) => fmt(x, SIG[p].d)) }
+        : { size: 40, show: true, stroke: "transparent", grid: { show: false }, ticks: { show: false }, values: () => [] },
+    ],
+    series,
+    hooks: { drawClear, draw: [playheadHook], setCursor: [setCursor] },
+  };
+}
+/* NDT strip: one lane under the plots, each indication window drawn in its type colour, hover for details */
+function buildNdtStrip(box, sync, stripH) {
+  const nd = S.detail.ndt || {}, wins = S.detail.defect_windows || [];
+  const types = [...new Set(wins.map((w) => w.defect))];
+  const label = !nd.inspected && !wins.length ? "not inspected" : wins.length ? types.map((t) => `${prettyDef(t)} ×${wins.filter((w) => w.defect === t).length}`).join(", ") : "no indications";
+  const row = h("div", { class: "chart-row ndt-row" },
+    h("div", { class: "chart-lbl" }, h("div", { class: "n" }, `NDT ${(nd.methods || []).join("/") || (S.detail.source?.synthetic ? "(sim)" : "")}`),
+      h("div", { class: "ndt-sum", title: label }, label)),
+    h("div", { class: "chart-box" }));
+  box.append(row);
+  const el = row.querySelector(".chart-box");
+  const draw = (u) => {
+    const { ctx, bbox } = u;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(bbox.left, bbox.top, bbox.width, bbox.height); ctx.clip();
+    ctx.fillStyle = "rgba(255,255,255,0.025)"; ctx.fillRect(bbox.left, bbox.top + 3, bbox.width, bbox.height - 6);
+    if (!nd.inspected && !wins.length) {
+      ctx.fillStyle = "rgba(134,145,160,0.5)"; ctx.font = `${10 * devicePixelRatio}px IBM Plex Mono`;
+      ctx.fillText("no NDT for this pass — internal quality unknown", bbox.left + 8 * devicePixelRatio, bbox.top + bbox.height / 2 + 3.5 * devicePixelRatio);
+    }
+    for (const w of wins) {
+      const x0 = u.valToPos(w.t_start, "x", true), x1 = Math.max(u.valToPos(w.t_end, "x", true), x0 + 3 * devicePixelRatio);
+      const c = defCol(w.defect);
+      ctx.fillStyle = w === S.ndtHover ? "#fff" : c;
+      ctx.fillRect(x0, bbox.top + 3, x1 - x0, bbox.height - 6);
+    }
+    ctx.restore();
+  };
+  const u = new uPlot(chartOpts(null, el, true, stripH, [0, 1], [{}, { show: false }], sync, [draw], () => {}), [S.sig.t, S.sig.t.map(() => 0.5)], el);
+  const tip = $("#tip");
+  u.over.addEventListener("mousemove", (e) => {
+    const t = u.posToVal(e.offsetX, "x"), tol = (u.posToVal(e.offsetX + 4, "x") - t);
+    const w = wins.find((x) => t >= x.t_start - tol && t <= x.t_end + tol);
+    if (w !== S.ndtHover) { S.ndtHover = w; u.redraw(false, false); }
+    if (!w) { tip.classList.add("hidden"); return; }
+    tip.innerHTML = "";
+    tip.append(h("b", { style: { color: defCol(w.defect) } }, prettyDef(w.defect)),
+      h("div", {}, `${fmt(w.t_start, 2)}–${fmt(w.t_end, 2)} s from arc start`),
+      w.x_start_mm != null ? h("div", {}, `x ${w.x_start_mm}–${w.x_end_mm} mm along the weld`) : null,
+      h("div", { class: "sub" }, `${w.method || (nd.methods || []).join(" + ") || "NDT"} indication · click to seek`));
+    tip.classList.remove("hidden");
+    tip.style.left = `${Math.min(e.clientX + 12, innerWidth - 230)}px`; tip.style.top = `${e.clientY - 70}px`;
+  });
+  u.over.addEventListener("mouseleave", () => { S.ndtHover = null; tip.classList.add("hidden"); u.redraw(false, false); });
+  u.over.addEventListener("click", (e) => { const w = S.ndtHover; seek(w ? w.t_start : u.posToVal(e.offsetX, "x")); });
+  S.charts.push({ p: null, u, el, strip: true });
 }
 function resizeCharts() {
   if (!S.charts.length) return;
   const box = $("#charts");
-  const height = Math.max(46, Math.floor((box.clientHeight - 30) / S.charts.length) - 1);
-  S.charts.forEach((c, i) => c.u.setSize({ width: Math.max(100, c.el.clientWidth), height: height + (i === S.charts.length - 1 ? 18 : 0) }));
+  const strip = S.charts.find((c) => c.strip);
+  const plots = S.charts.filter((c) => !c.strip);
+  const notes = $$(".chart-note", box).length;
+  const height = Math.max(40, Math.floor((box.clientHeight - 30 - notes * 19 - (strip ? 22 : 0)) / Math.max(plots.length, 1)) - 1);
+  plots.forEach((c, i) => c.u.setSize({ width: Math.max(100, c.el.clientWidth), height: height + (!strip && i === plots.length - 1 ? 18 : 0) }));
+  if (strip) strip.u.setSize({ width: Math.max(100, strip.el.clientWidth), height: 22 + 18 });
 }
 window.addEventListener("resize", () => { clearTimeout(S.rz); S.rz = setTimeout(resizeCharts, 120); });
 
@@ -406,7 +662,8 @@ function showVal(p, idx) {
   const hover = idx != null;
   const i = hover ? idx : idxAt(currentT());
   const v = S.sig.series[p][i];
-  el.innerHTML = `${fmt(v, SIG[p].d)}<small>${SIG[p].u}${hover ? ` @${fmt(S.sig.t[i])}s` : ""}</small>`;
+  const tr = TRAIL[p] && S.sig.series[TRAIL[p]] ? S.sig.series[TRAIL[p]][i] : undefined;
+  el.innerHTML = `${fmt(v, SIG[p].d)}${tr !== undefined ? `<span class="tr"> / ${fmt(tr, SIG[p].d)}</span>` : ""}<small>${SIG[p].u}${hover ? ` @${fmt(S.sig.t[i])}s` : ""}</small>`;
   el.style.color = valState(p, v) ? "#ff8b8b" : "";
 }
 function renderHud(t) {
@@ -415,16 +672,18 @@ function renderHud(t) {
   const hud = $("#hud");
   const cur = S.sig.series.current_a?.[i];
   const arcOff = cur != null && cur < 5;
+  const real = !S.detail.source?.synthetic;
   hud.innerHTML = (arcOff ? '<div class="r"><div class="k"><span>Arc</span></div><div class="v">OFF</div></div>' : "") +
-    CHART_PARAMS.filter((p) => S.sig.series[p]).map((p) => {
+    CHART_PARAMS.filter((p) => S.sig.series[p]).slice(0, 6).map((p) => {
     const v = S.sig.series[p][i];
+    const tr = TRAIL[p] && S.sig.series[TRAIL[p]] ? S.sig.series[TRAIL[p]][i] : undefined;
     const bad = !arcOff && valState(p, v);
-    return `<div class="r ${bad ? "bad" : ""}"><div class="k"><span>${SIG[p].n}</span><span>${bad ? "OUT OF WPS" : ""}</span></div><div class="v">${fmt(v, SIG[p].d)}<small>${SIG[p].u}</small></div></div>`;
+    return `<div class="r ${bad ? "bad" : ""}"><div class="k"><span>${SIG[p].n}${tr !== undefined ? " L/T" : ""}</span><span>${bad ? (real ? "OFF SETTINGS" : "OUT OF WPS") : ""}</span></div><div class="v">${fmt(v, SIG[p].d)}${tr !== undefined ? `<span class="tr">/${fmt(tr, SIG[p].d)}</span>` : ""}<small>${SIG[p].u}</small></div></div>`;
   }).join("");
-  const w = (S.detail.defect_windows || []).find((d) => t >= d.t_start && t <= d.t_end);
+  const w = (S.detail.defect_windows || []).find((d) => t >= d.t_start - 0.05 && t <= d.t_end + 0.05);
   const flash = $("#defectFlash");
   flash.classList.toggle("hidden", !w);
-  if (w) flash.textContent = `● ${w.defect.replace(/_/g, " ")} · ${fmt(t - w.t_start)} s in`;
+  if (w) { flash.textContent = `● ${prettyDef(w.defect)} · ${real ? `${(S.detail.ndt?.methods || ["NDT"]).join("/")} indication` : `${fmt(t - w.t_start)} s in`}`; flash.style.setProperty("--dc", defCol(w.defect)); }
 }
 function tick(force = false) {
   if (!S.sig) return;
@@ -462,8 +721,12 @@ function botMsg() {
 function scrollChat() { const m = $("#messages"); m.scrollTop = m.scrollHeight; }
 function welcome() {
   const m = botMsg();
-  m.append(h("div", { class: "welcome md", html: md(
-    "**Weld Copilot** for Cell 2 — ask in plain English. I query **Mosaico** sensor data, check passes against the **WPS**, " +
+  m.append(h("div", { class: "welcome md", html: md(isReal()
+    ? "**Weld Copilot** on **real welding data** — AIMEN tandem-SAW beads on SA-516 vessel plate (RT/UT-inspected, bead photos) " +
+      "and BAM tandem-GMAW layers (real process video). I query the signals in **Mosaico**, check NDT indications and the published " +
+      "settings, and use **NVIDIA Cosmos 3** to inspect photos/clips and render what-ifs. When the signals show nothing, I say so.\n\n" +
+      "Start with the numbered demo prompts below ↓"
+    : "**Weld Copilot** for Cell 2 — ask in plain English. I query **Mosaico** sensor data, check passes against the **WPS**, " +
     "and use **NVIDIA Cosmos 3** to inspect clips, render what-ifs and turn simulator output into photoreal training video.\n\n" +
     "Start with the numbered demo prompts below ↓") }));
 }
@@ -566,16 +829,18 @@ function handleEvent(st, ev) {
 }
 function toolStage(name) {
   return { list_passes: "mosaico", find_anomalies: "mosaico", get_signals_summary: "mosaico", wps_check: "mosaico", show_weld: "mosaico",
+    show_photo: "mosaico", ndt_summary: "mosaico",
     assess_weld: "cosmos", what_if: "cosmos", sim2real: "cosmos", dataset_stats: "curator", search_clips: "curator" }[name] || "copilot";
 }
 
 /* ===================================================================== cards */
 function renderCard(c) {
-  const f = { table: cardTable, chart: cardChart, verdict: cardVerdict, jump: cardJump, job: cardJob, stats: cardStats, clips: cardClips }[c.type];
+  const f = { table: cardTable, chart: cardChart, verdict: cardVerdict, jump: cardJump, job: cardJob, stats: cardStats, clips: cardClips, photo: cardPhoto }[c.type];
   return f ? f(c) : h("pre", {}, JSON.stringify(c, null, 2));
 }
-function cellVal(col, v) {
-  if (col.badge) return h("span", { class: `badge ${v}` }, `${ICON[v] || ""} ${v}`);
+function cellVal(col, v, row) {
+  if (col.badge && col.text_key) return h("span", { class: `badge ${RT_CLASS[v] || v}` }, `${ICON[v] || ""} ${row[col.text_key] || v}`);
+  if (col.badge) return h("span", { class: `badge ${RT_CLASS[v] || v}` }, `${ICON[v] || ""} ${String(v).replace(/_/g, " ")}`);
   if (Array.isArray(v)) return v.map((x) => String(x).replace(/_/g, " ")).join(", ") || "—";
   if (typeof v === "number") return Number.isInteger(v) ? v : fmt(v, 2);
   return v ?? "—";
@@ -587,7 +852,8 @@ function cardTable(c) {
     const seq = r.sequence || r.sequence_name || c.default_sequence;
     const t = c.time_key ? r[c.time_key] : null;
     tb.append(h("tr", { class: seq ? "click" : "", title: seq ? "Open in replay" : null,
-      onclick: seq ? () => selectPass(seq, t) : null }, c.columns.map((col) => h("td", {}, cellVal(col, r[col.key])))));
+      onclick: seq ? () => selectPass(seq, t) : null }, c.columns.map((col) => h("td", {}, cellVal(col, r[col.key], r),
+        col.key === "sequence" && r.simulated && isReal() ? h("span", { class: "simtag" }, "SIM") : null))));
   });
   tbl.append(tb);
   return h("div", { class: "card" }, h("div", { class: "card-h" }, c.title, h("span", { class: "r" }, h("span", { class: "badge arc" }, "Mosaico"))),
@@ -595,7 +861,7 @@ function cardTable(c) {
 }
 function cardChart(c) {
   const body = h("div", { class: "card-b", style: { padding: "6px 4px" } });
-  const card = h("div", { class: "card" }, h("div", { class: "card-h" }, c.title, h("span", { class: "r" }, h("span", { class: "badge neutral" }, "shaded = WPS"))), body);
+  const card = h("div", { class: "card" }, h("div", { class: "card-h" }, c.title, h("span", { class: "r" }, h("span", { class: "badge neutral" }, isReal() ? "band = settings window" : "shaded = WPS"))), body);
   requestAnimationFrame(() => {
     const params = Object.keys(c.series);
     params.forEach((p, i) => {
@@ -604,7 +870,8 @@ function cardChart(c) {
       const bad = outOfSpec(vals, lim).some((v) => v != null);
       const holder = h("div");
       const yr = yRange(vals, lim);
-      const row = h("div", { class: "spark-row" }, h("div", { class: "n" }, SIG[p]?.n || p, h("b", { style: { color: bad ? "#ff8b8b" : "" } }, `${fmt(Math.min(...vals.filter((x) => x != null)), SIG[p]?.d ?? 1)}–${fmt(Math.max(...vals.filter((x) => x != null)), SIG[p]?.d ?? 1)}`)), holder);
+      const isTrail = Object.values(TRAIL).includes(p);
+      const row = h("div", { class: "spark-row" }, h("div", { class: "n" }, h("span", { style: { color: isTrail ? COL.trail : "" } }, SIG[p]?.n || p), h("b", { style: { color: bad ? "#ff8b8b" : "" } }, `${fmt(Math.min(...vals.filter((x) => x != null)), SIG[p]?.d ?? 1)}–${fmt(Math.max(...vals.filter((x) => x != null)), SIG[p]?.d ?? 1)}`)), holder);
       body.append(row);
       const last = i === params.length - 1;
       const u = new uPlot({
@@ -613,18 +880,27 @@ function cardChart(c) {
         scales: { x: { time: false }, y: { range: () => yr } },
         axes: [{ show: last, stroke: COL.axis, size: 16, gap: 1, grid: { show: false }, ticks: { show: false }, font: "9px IBM Plex Mono", values: (u, v) => v.map((x) => `${x}s`) },
           { show: false }],
-        series: [{}, { stroke: COL.arc, width: 1.25 }, { stroke: COL.crit, width: 2 }],
+        series: [{}, { stroke: isTrail ? COL.trail : COL.arc, width: 1.25 }, { stroke: COL.crit, width: 2 }],
         hooks: { drawClear: [bandHook(p, lim, c.defects || [], [])] },
       }, [c.t, vals, outOfSpec(vals, lim)], holder);
       u.over.style.cursor = "pointer";
       u.over.addEventListener("click", (e) => selectPass(c.sequence, u.posToVal(e.offsetX, "x")));
     });
+    const chk = c.signal_check;
+    if (chk && chk.params) {
+      const c0 = chk.params.current_a || Object.values(chk.params)[0];
+      body.append(h("div", { class: `sigchk ${chk.signature ? "yes" : "no"}` },
+        h("b", {}, chk.signature ? "Signal change inside NDT windows" : "No electrical signature"),
+        ` — ${chk.n_windows} windows: ${fmt(c0.mean_in, 0)} vs ${fmt(c0.mean_clean, 0)} ${c0.unit} clean weld, ${c0.windows_outside_band}/${c0.windows_checked} outside the normal band`));
+    }
   });
   return card;
 }
 function cardVerdict(c) {
   const v = (c.verdict || "review").toLowerCase();
-  const thumb = c.video_url ? h("div", { class: "vthumb" }, h("video", { src: c.video_url, muted: true, autoplay: true, loop: true, playsinline: true })) : null;
+  const thumb = c.video_url ? h("div", { class: "vthumb" }, h("video", { src: c.video_url, muted: true, autoplay: true, loop: true, playsinline: true }))
+    : c.image_url ? h("div", { class: "vthumb", title: "Bead photo assessed", onclick: () => selectPass(c.sequence_name, null, "photo") }, h("img", { src: c.image_url, alt: "bead photo" })) : null;
+  const ndtTxt = c.ndt_indications ? (Object.keys(c.ndt_indications).length ? "NDT: " + Object.entries(c.ndt_indications).map(([k, v]) => `${prettyDef(k)} ×${v}`).join(", ") : "NDT clear") : null;
   const defects = h("div", { class: "defects" }, (c.defects || []).map((d) => h("div", { class: "drow" },
     h("span", {}, (d.type || "").replace(/_/g, " ")), h("div", { class: "bar" }, h("i", { style: { width: `${Math.round((d.confidence || 0) * 100)}%` } })),
     h("span", { class: "pc" }, `${Math.round((d.confidence || 0) * 100)}%`),
@@ -636,12 +912,14 @@ function cardVerdict(c) {
     h("div", { class: "card-h" }, "Cosmos 3 Reasoner · weld QA", h("span", { class: "r" }, h("span", { class: "badge molten" }, "Cosmos 3"))),
     h("div", { class: "verdict-top" },
       h("div", { class: `vbig ${v}` }, ICON[v] || "", v.toUpperCase()),
-      h("div", { class: "vmeta" }, h("div", {}, h("b", {}, c.sequence_name)), h("div", {}, `clip ${fmt(c.t0_s)}–${fmt(c.t1_s)} s${c.clip_id ? ` · ${c.clip_id}` : ""}`),
-        c.rt_result ? h("div", {}, "RT ground truth: ", h("span", { class: `badge ${c.rt_result}` }, c.rt_result)) : null),
+      h("div", { class: "vmeta" }, h("div", {}, h("b", {}, c.sequence_name)),
+        h("div", {}, c.input_kind === "photo" ? "input: bead photo + whole-pass signals" : c.input_kind === "signals" ? "input: signals only (no image)" : `clip ${fmt(c.t0_s)}–${fmt(c.t1_s)} s${c.clip_id ? ` · ${c.clip_id}` : ""}`),
+        c.rt_result ? h("div", {}, ndtTxt || c.rt_result === "not_inspected" ? "NDT ground truth: " : "RT ground truth: ",
+          h("span", { class: `badge ${RT_CLASS[c.rt_result] || c.rt_result}` }, ndtTxt || String(c.rt_result).replace(/_/g, " "))) : null),
       thumb),
     (c.defects || []).length ? defects : null,
     h("div", { class: "kv" },
-      h("div", { class: "k" }, "Root cause"), h("div", {}, c.root_cause || "—"),
+      h("div", { class: "k" }, c.ndt_indications ? "Cause (evidence)" : "Root cause"), h("div", {}, c.root_cause || "—"),
       h("div", { class: "k" }, "Recommended action"), h("div", {}, c.recommended_action || "—"),
       findings.length ? [h("div", { class: "k" }, "WPS findings"), h("ul", {}, findings)] : null,
       c.code_basis ? [h("div", { class: "k" }, "Code basis"), h("div", {}, c.code_basis)] : null),
@@ -658,11 +936,12 @@ function cardJump(c) {
 function mediaBlock(res) {
   if (!res) return null;
   const left = res.kind === "sim2real" ? (res.control_url || res.source_url) : res.source_url;
-  const leftCap = res.kind === "sim2real" ? `SIMULATOR · ${(res.control_kind || "edge").toUpperCase()}` : "ORIGINAL";
+  const leftCap = res.kind === "sim2real" ? `${isReal() ? "CONTROL" : "SIMULATOR"} · ${(res.control_kind || "edge").toUpperCase()}` : "ORIGINAL";
   const rightCap = res.kind === "sim2real" ? "COSMOS 3 TRANSFER" : `WHAT-IF · ${(res.label || "").toUpperCase()}`;
   const vids = [];
   const mk = (src, cap) => h("figure", {}, h("video", { src, muted: true, autoplay: true, loop: true, playsinline: true, controls: false }), h("figcaption", {}, cap));
   if (left) vids.push(mk(left, leftCap));
+  else if (res.source_image_url) vids.push(h("figure", {}, h("img", { src: res.source_image_url, alt: "source photo", class: "srcimg" }), h("figcaption", {}, "SOURCE · BEAD PHOTO")));
   vids.push(mk(res.video_url, rightCap));
   const wrap = h("div", { class: vids.length > 1 ? "pair" : "single" }, vids);
   if (vids.length > 1) { // keep the two loops in lock-step
@@ -719,6 +998,12 @@ function cardStats(c) {
     h("div", { class: "t" }, h("i", { style: { width: `${(b.value / maxT) * 100}%` } }), h("i", { class: "rej", style: { width: `${((b.total - b.value) / maxT) * 100}%` } })),
     h("span", { class: "n" }, `${b.value}/${b.total}`))));
   return h("div", { class: "card" }, h("div", { class: "card-h" }, c.title, h("span", { class: "r" }, h("span", { class: "badge arc" }, "Curator"))), kp, bars);
+}
+function cardPhoto(c) {
+  const src = c.source || {};
+  return h("div", { class: "card" }, h("div", { class: "card-h" }, c.title, h("span", { class: "r" }, rtBadge(c.rt_result, Object.fromEntries(Object.entries((c.indications || []).reduce((a, i) => { a[i.type] = (a[i.type] || 0) + 1; return a; }, {})))))),
+    h("div", { class: "photo-card" }, c.photos.map((ph) => h("img", { src: ph.url, alt: ph.name, title: "Open in the replay viewer", onclick: () => { showTab("copilot"); selectPass(c.sequence, null, "photo"); } }))),
+    h("div", { class: "card-f" }, h("span", { class: "sub" }, c.caption || ""), src.doi ? h("a", { class: "sub", href: `https://doi.org/${src.doi}`, target: "_blank", rel: "noopener" }, `DOI ${src.doi}`) : null));
 }
 function cardClips(c) {
   return h("div", { class: "card" }, h("div", { class: "card-h" }, c.title),
@@ -861,9 +1146,22 @@ async function loadFlow() {
   const c = f.collect, m = f.mosaico, x = f.export, cu = f.curate, co = f.cosmos;
   const realR = co.assess.real, realG = co.what_if.real, realT = co.sim2real.real;
   const curReal = cu.backend && cu.backend.startsWith("curator");
+  const RD = f.data?.real ? f.real : null;
+  const srcLine = (sx) => `${sx.short}: ${plural(sx.passes, sx.id === "aimen_saw" ? "bead" : "layer")} on ${sx.coupons.join(", ")}`
+    + (sx.inspected ? ` · ${sx.with_indications} with NDT indications (${sx.indications})` : " · not NDT-inspected")
+    + (sx.videos ? ` · ${plural(sx.videos, "video")}` : "") + (sx.photos ? ` · ${plural(sx.photos, "photo")}` : "");
+
+  const collectReal = RD && { id: "collect", tab: "copilot", n: 1, title: "Real weld data", tech: "AIMEN SAW + BAM tandem-GMAW · CC BY 4.0",
+    does: [...(f.sources || []).map(srcLine),
+           "Converted to one pass dir each: arc (lead + trail) @100 Hz, travel, thermal, NDT indications on the same clock",
+           RD.simulated ? `${plural(RD.simulated, "simulator pass", "simulator passes")} also loaded — marked SIMULATED` : "No simulator data mixed in"],
+    big: RD.passes, unit: "real weld passes",
+    foot: `${RD.inspected} NDT-inspected · ${RD.with_indications} with indications (${RD.indications} total) · ${RD.not_inspected} not inspected`,
+    status: (RD.fixture || (f.sources || []).some((x) => x.fixture)) ? "sim" : "ok",
+    statusText: (RD.fixture || (f.sources || []).some((x) => x.fixture)) ? "Fixture stand-ins" : "Real data", credits: true };
 
   const stages = [
-    { id: "collect", tab: "copilot", n: 1, title: "Weld cell sensors", tech: "WeldCell simulator",
+    collectReal || { id: "collect", tab: "copilot", n: 1, title: "Weld cell sensors", tech: "WeldCell simulator",
       does: ["Robotic pipe-spool & vessel passes (GTAW root, FCAW fill/cap, SAW seam)",
              "Arc current/voltage, wire feed, gas @100 Hz · robot joints @50 Hz · IR interpass @10 Hz · torch camera 24 fps",
              "Defects injected with their physical signature; each pass gets an RT (X-ray) result"],
@@ -871,11 +1169,15 @@ async function loadFlow() {
       status: c.passes ? (c.fixtures ? "sim" : "sim") : "empty",
       statusText: c.fixtures ? "Mock fixtures" : "Simulated data" },
     { id: "mosaico", tab: "copilot", n: 2, title: "Store & query by physics", tech: "Mosaico",
-      does: ["One typed sequence per pass: custom WeldArc / WeldTravel / WeldThermal ontology + JPEG camera topic",
+      does: RD ? ["One typed sequence per pass: WeldArc (lead + trail electrode), travel, thermal + camera / photo topics",
+                  "NDT indications stored as defect events on the arc clock",
+                  "Query on physical values, e.g. current outside the published-settings window"]
+        : ["One typed sequence per pass: custom WeldArc / WeldTravel / WeldThermal ontology + JPEG camera topic",
              "Query on physical values, e.g. gas_lpm < 12, current over WPS max",
              "Synchronised 5 s windows exported with sensor sidecars"],
       big: x.clips || m.sequences, unit: x.clips ? "clips exported" : "sequences",
-      foot: `${plural(m.wps_break, "pass")} broke the WPS · ${x.defect_clips} defect windows`,
+      foot: RD ? `${plural(m.wps_break, "pass")} outside published settings · ${x.defect_clips} defect windows`
+        : `${plural(m.wps_break, "pass")} broke the WPS · ${x.defect_clips} defect windows`,
       status: m.status === "ok" ? "live" : "offline", statusText: m.status === "ok" ? "mosaicod live" : "Offline files" },
     { id: "curator", tab: "dataset", n: 3, title: "Curate training data", tech: "NVIDIA Cosmos Curator",
       does: ["Cut → transcode → quality filter (blur, motion, arc glare) → near-duplicate removal",
@@ -888,20 +1190,26 @@ async function loadFlow() {
       statusText: !cu.total ? null : curReal ? "Cosmos Curator" : "CPU fallback" },
     { id: "cosmos", tab: "generate", n: 4, title: "World models", tech: "NVIDIA Cosmos 3",
       sub: [
-        { name: "Reasoner — inspect", what: "Watches a clip + reads the sensor stats → accept / reject / review, defect, root cause, fix",
+        { name: "Reasoner — inspect", what: RD ? "Looks at a process clip or bead photo + reads the signals and NDT → verdict; states a cause only if the data shows one"
+            : "Watches a clip + reads the sensor stats → accept / reject / review, defect, root cause, fix",
           real: realR, fb: co.assess.fallback, live: co.reasoner_live },
         { name: "Generator — what-if", what: "Image→video: “what if travel speed drops 20 %?”",
           real: realG, fb: co.what_if.fallback, live: co.generator_live },
-        { name: "Transfer — sim → real", what: "Simulator edge/depth video → photoreal footage, labels carried over",
+        { name: RD ? "Transfer — new variants" : "Transfer — sim → real", what: RD ? "Edge video of the real BAM camera → new photoreal variants, same timing so labels carry over"
+            : "Simulator edge/depth video → photoreal footage, labels carried over",
           real: realT, fb: co.sim2real.fallback, live: co.generator_live },
       ] },
     { id: "copilot", tab: "copilot", n: 5, title: "Ask in plain English", tech: "Weld Copilot",
-      does: ["Chat model calls tools: query passes, WPS check, find anomalies, assess, what-if, sim→real, dataset stats",
+      does: RD ? ["Chat model calls tools: NDT summary, signal check, settings check, bead photo, assess, what-if",
+                  "Answers cite pass, time, value and NDT method — and say so when the signals show nothing",
+                  "Never invents a defect cause the data doesn't support"]
+        : ["Chat model calls tools: query passes, WPS check, find anomalies, assess, what-if, sim→real, dataset stats",
              "Answers cite sequence, time and value vs WPS limit",
              "Replay jumps to the exact moment in the weld"],
       big: null, unit: f.copilot.llm, foot: "chat model", status: "live", statusText: f.copilot.llm },
   ];
-  const flowsOn = ["passes + 4 sensor streams", "5 s clips + sidecars", "captioned clips + prompts", "verdicts + videos"];
+  const flowsOn = RD ? ["passes + signals + NDT", "5 s clips + sidecars", "captioned clips + prompts", "verdicts + videos"]
+    : ["passes + 4 sensor streams", "5 s clips + sidecars", "captioned clips + prompts", "verdicts + videos"];
 
   const card = (s) => {
     const el = h("button", { class: `fl-card fl-${s.id}`, onclick: () => showTab(s.tab), title: `Open the ${s.tab} tab` },
@@ -918,7 +1226,8 @@ async function loadFlow() {
     } else {
       el.append(h("ul", { class: "fl-does" }, s.does.map((d) => h("li", {}, d))),
         h("div", { class: "fl-out" }, s.big != null ? h("span", { class: "fl-big" }, s.big) : null, h("span", { class: "fl-unit" }, s.unit)),
-        h("div", { class: "fl-foot" }, s.foot), h("div", { class: "fl-st" }, fBadge(s.status, s.statusText)));
+        h("div", { class: "fl-foot" }, s.foot), h("div", { class: "fl-st" }, fBadge(s.status, s.statusText),
+          s.credits ? h("span", { class: "fl-cred", onclick: (ev) => { ev.stopPropagation(); openCredits(); } }, "credits →") : null));
     }
     return el;
   };
@@ -931,7 +1240,27 @@ async function loadFlow() {
   // follow one weld
   const e = f.example;
   let story = null;
-  if (e) {
+  if (e && e.real) {
+    const counts = Object.entries(e.counts || {});
+    const ctext = counts.map(([k, v]) => `${prettyDef(k)} ×${v}`).join(", ") || "indications";
+    const sc = e.signal_check;
+    const steps = [
+      ["Real data", `${e.source} ${e.coupon} ${e.pass_label} (${e.process} ${e.pass_type}, ${e.material}): RT/UT found ${ctext}`],
+      ["Mosaico", `Indications stored as defect events on the arc clock — first at ${fmt(e.defect_t, 1)} s from arc start`],
+      ["Signals", sc ? (sc.signature ? `Inside the ${sc.n_windows} windows the signals do change (${fmt(sc.mean_in, 0)} vs ${fmt(sc.mean_clean, 0)} ${sc.unit}) — a correlation, not a cause`
+        : `Inside the ${sc.n_windows} windows: ${fmt(sc.mean_in, 0)} vs ${fmt(sc.mean_clean, 0)} ${sc.unit} in the clean weld — no electrical signature`) : "No signal check available"],
+      ["Cosmos 3", e.verdict ? `Reasoner verdict on the ${e.has_photo ? "bead photo" : "clip"}: ${String(e.verdict).toUpperCase()} (${e.verdict_real ? "real Cosmos 3 output" : e.verdict_source})`
+        : `No Cosmos 3 verdict cached for this ${e.has_photo ? "bead photo" : "clip"} yet — the copilot shows an evidence-only rule check, labelled as such`],
+      ["Copilot", "Answers with the numbers and says plainly that the signals don't explain the defect — no invented cause"],
+    ];
+    const d0 = counts[0] ? prettyDef(counts[0][0]) : "the defect";
+    const ask = `Show ${d0} on ${e.coupon} ${String(e.pass_label || "").toLowerCase()} — did the arc signals change?`;
+    story = h("section", { class: "fl-story" },
+      h("div", { class: "fl-h" }, h("h3", {}, "Follow one real weld through it"),
+        h("span", { class: "sub" }, `${e.sequence} · ${e.source} · ${e.material}`)),
+      h("ol", { class: "fl-steps" }, steps.map(([k, t], i) => h("li", { class: `fl-step s${i}` }, h("b", {}, k), h("span", {}, t)))),
+      h("button", { class: "btn primary", onclick: () => { showTab("copilot"); sendChat(ask); } }, `Ask the copilot: “${ask}”`));
+  } else if (e) {
     const v = e.violation, sig = v && SIG[v.param];
     const lim = v ? (v.limit_lo != null && v.limit_hi != null ? `${v.limit_lo}–${v.limit_hi}` : v.limit_hi != null ? `≤ ${v.limit_hi}` : `≥ ${v.limit_lo}`) : "";
     const steps = [
@@ -963,22 +1292,88 @@ async function loadFlow() {
         h("small", {}, "no GPU or internet needed for the cached parts"))),
     h("div", { class: "fl-legend" }, ["live", "cached", "rule", "cpu", "offline", "sim"].map((k) => fBadge(k))));
 
+  // the honest finding, computed from the data on disk
+  let finding = null;
+  const fd = f.finding;
+  if (RD && fd) {
+    const ex = fd.example;
+    const exTxt = `${ex.sequence}: ${Object.entries(ex.counts).map(([k, v]) => `${prettyDef(k)} ×${v}`).join(", ")} — mean lead current ${fmt(ex.mean_in, 0)} ${ex.unit} inside the windows vs ${fmt(ex.mean_clean, 0)} ${ex.unit} in the clean weld (${ex.outside}/${ex.n_windows} windows outside the normal band).`;
+    finding = h("section", { class: `fl-finding ${fd.passes_with_signature ? "mixed" : ""}` },
+      h("div", { class: "fl-fi-k" }, "What the real data says"),
+      h("div", { class: "fl-fi-big" }, fd.passes_with_signature === 0
+        ? `NDT-found defects left no trace in the arc signals — none of the ${plural(fd.passes_checked, "pass", "passes")} with indications (${fd.windows} indication windows) shows a change`
+        : `Only ${fd.passes_with_signature} of ${plural(fd.passes_checked, "pass", "passes")} with NDT indications show a signal change inside the windows`),
+      h("p", {}, exTxt),
+      h("p", { class: "sub" }, "Real defects do not necessarily leave an electrical signature. A current/voltage monitor alone would miss them, so the copilot reports this instead of inventing one — and never names a cause the data doesn't show."));
+  }
+  const credits = RD ? h("section", { class: "fl-credits" }, h("div", { class: "fl-h" }, h("h3", {}, "Data sources & credits"),
+    h("span", { class: "sub" }, "Both datasets are CC BY 4.0 — attribution required, shown wherever their data appears")),
+    creditsList(f.sources || [], true)) : null;
+
   root.innerHTML = "";
   root.append(
     h("header", { class: "fl-head" }, h("h2", {}, "How WeldWorld works"),
-      h("p", {}, "From the weld cell to a decision: what each step does, which component does it, and what it produced for this dataset. "
-        + "Click a step to open its tab.")),
-    lane, story, where);
+      h("p", {}, (RD ? "From real welds to a decision: public AIMEN and BAM welding data, " : "From the weld cell to a decision: ")
+        + "what each step does, which component does it, and what it produced for this dataset. Click a step to open its tab.")),
+    lane, finding, story, credits, where);
 }
 
+/* ===================================================================== data sources & credits */
+function creditsList(sources, compact = false) {
+  return h("div", { class: `cred-list ${compact ? "compact" : ""}` }, sources.map((x) => h("article", { class: `cred ${x.synthetic ? "sim" : ""}`, id: `cred-${x.id}` },
+    h("div", { class: "cred-h" }, h("b", {}, x.title), x.synthetic ? h("span", { class: "badge molten" }, "SIMULATED") : h("span", { class: "badge ok" }, x.license),
+      x.fixture ? h("span", { class: "badge warn", title: "Synthetic stand-ins from copilot/fixtures_real.py are loaded, not the converted dataset" }, "fixture stand-ins loaded") : null),
+    x.synthetic ? h("p", {}, x.attribution) : [
+      h("div", { class: "cred-kv" },
+        h("span", { class: "k" }, "Authors"), h("span", {}, x.authors),
+        h("span", { class: "k" }, "Publisher"), h("span", {}, [x.org, x.project].filter(Boolean).join(" · ")),
+        h("span", { class: "k" }, "Repository"), h("span", {}, "Zenodo · ", h("a", { href: `https://doi.org/${x.doi}`, target: "_blank", rel: "noopener" }, `doi.org/${x.doi}`),
+          " · ", h("a", { href: x.url, target: "_blank", rel: "noopener" }, x.url.replace("https://", ""))),
+        h("span", { class: "k" }, "Licence"), h("span", {}, h("a", { href: x.license_url, target: "_blank", rel: "noopener" }, `${x.license} — Creative Commons Attribution 4.0 International`)),
+        compact ? null : [h("span", { class: "k" }, "Process"), h("span", {}, x.process), h("span", { class: "k" }, "Material"), h("span", {}, x.material),
+          h("span", { class: "k" }, "Used here"), h("span", {}, x.streams)],
+        h("span", { class: "k" }, "Changes"), h("span", {}, x.modified),
+        h("span", { class: "k" }, "Loaded"), h("span", {}, x.loaded ? `${x.passes} passes · ${x.coupons.join(", ")}${x.inspected ? ` · ${x.with_indications}/${x.inspected} inspected passes with indications` : ""}${x.videos ? ` · ${x.videos} videos` : ""}${x.photos ? ` · ${x.photos} photos` : ""}` : "not loaded in this session")),
+      compact ? null : h("pre", { class: "cred-cite", title: "Attribution line" }, x.attribution)])));
+}
+async function openCredits(focus) {
+  const m = $("#creditsModal");
+  m.classList.remove("hidden");
+  const body = $("#creditsBody");
+  try {
+    const r = await api("/api/sources");
+    body.innerHTML = "";
+    body.append(h("p", { class: "cred-intro" }, "This demo runs on public research data. Both datasets are published under ",
+      h("a", { href: "https://creativecommons.org/licenses/by/4.0/", target: "_blank", rel: "noopener" }, "CC BY 4.0"),
+      ", which allows commercial use with attribution and an indication of changes. Thank you to the authors at AIMEN and BAM."),
+      creditsList(r.sources),
+      h("p", { class: "sub" }, "Generated videos (Cosmos 3 what-if / transfer) are synthetic derivatives and are labelled as such. "
+        + "Settings windows are the published nominal settings ±10 % — a demo assumption, not a qualified WPS."));
+    if (focus) $(`#cred-${CSS.escape(focus)}`)?.scrollIntoView({ block: "start" });
+  } catch (e) { body.innerHTML = `<div class="placeholder">Could not load: ${esc(e.message)}</div>`; }
+}
+$("#creditsBtn").onclick = () => openCredits();
+$("#creditsClose").onclick = () => $("#creditsModal").classList.add("hidden");
+$("#creditsModal").addEventListener("click", (e) => { if (e.target.id === "creditsModal") e.currentTarget.classList.add("hidden"); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("#creditsModal").classList.add("hidden"); });
+
 (async function boot() {
-  welcome();
   pollHealth();
   setInterval(pollHealth, 5000);
   const [sug] = await Promise.all([api("/api/suggestions"), loadPasses()]);
+  S.data = sug.data || S.data;
+  welcome();
   S.demo = sug.demo;
   renderSuggestions();
-  const first = S.passes.find((p) => p.sequence_name === "SP-1043_J07_P3_FCAW")
+  if (isReal()) {
+    $("#brandSub").textContent = "Physical AI on real welding data · AIMEN SAW + BAM tandem-GMAW";
+    $("#chatSub").textContent = "Mosaico · NDT · Cosmos 3";
+    $('#genKind [data-v="sim2real"]').textContent = "Transfer";
+  }
+  const indic = (p) => p.rt_result === "indications" || p.rt_result === "reject";
+  const first = (isReal() && (S.passes.find((p) => p.sequence_name === "PP5_B02_SAW")
+      || [...S.passes].filter((p) => !p.synthetic && indic(p)).sort((a, b) => Object.values(b.defect_counts || {}).reduce((x, y) => x + y, 0) - Object.values(a.defect_counts || {}).reduce((x, y) => x + y, 0))[0]))
+    || S.passes.find((p) => p.sequence_name === "SP-1043_J07_P3_FCAW")
     || S.passes.find((p) => p.has_defect && p.rt_result === "reject") || S.passes[0];
   if (first) {
     await selectPass(first.sequence_name);

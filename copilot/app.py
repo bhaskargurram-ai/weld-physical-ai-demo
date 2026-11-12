@@ -27,7 +27,7 @@ for _ext, _type in ((".js", "text/javascript"), (".mjs", "text/javascript"), (".
                     (".svg", "image/svg+xml"), (".mp4", "video/mp4"), (".json", "application/json")):
     mimetypes.add_type(_type, _ext)
 from .agent import Session, make_agent
-from .data import SIGNAL_INFO, SIGNALS, DataLayer, mosaico_health
+from .data import SIGNAL_INFO, SIGNALS, DataLayer, clean_json, mosaico_health
 from .jobs import JobManager
 from .models import CHANGE_TEMPLATES, WorldModels, build_prompt, cosmos_health, mode_label, parse_change
 from .tools import TOOL_SPECS, Toolbox
@@ -43,14 +43,30 @@ DEMO_FLOW = [
     {"label": "Make photoreal training video from the simulator", "hint": "Cosmos Transfer"},
     {"label": "How many curated clips do we have for porosity?", "hint": "Curator dataset"},
 ]
+# Real data (AIMEN SAW + BAM tandem-GMAW). Each chip names passes from the default conversion (PP3-PP7, WID617/630).
+DEMO_FLOW_REAL = [
+    {"label": "Which SA-516 vessel passes had NDT indications?", "hint": "RT/UT ground truth"},
+    {"label": "Show porosity on PP5 bead 2 — did the arc signals change?", "hint": "Replay + honest signal check"},
+    {"label": "Compare lead vs trail current on WID617 layer 3", "hint": "Tandem signals"},
+    {"label": "Which passes ran outside their published settings?", "hint": "Mosaico query"},
+    {"label": "Inspect the bead photo of PP5 bead 2", "hint": "Cosmos 3 Reasoner · photo"},
+    {"label": "What if travel speed dropped 20 % on WID630 layer 4?", "hint": "Cosmos 3 Generator"},
+]
 
 
 def create_app() -> FastAPI:
-    if config.fixtures_enabled():
+    if config.fixtures_mode() == "real":
+        from .fixtures_real import ensure_fixtures as ensure_real
+        os.environ.setdefault("DATA_DIR", str(config.FIXTURE_REAL_DIR))
+        os.environ.setdefault("MOSAICO_OFFLINE", "1")
+        ensure_real(config.data_dir(), videos=os.environ.get("COPILOT_FIXTURE_VIDEO", "1") == "1")
+    elif config.fixtures_enabled():
         from .fixtures import ensure_fixtures
         os.environ.setdefault("DATA_DIR", str(config.FIXTURE_DIR))   # so worldmodels/mosaico_io agree on paths
         os.environ.setdefault("MOSAICO_OFFLINE", "1")
         ensure_fixtures(config.data_dir(), videos=os.environ.get("COPILOT_FIXTURE_VIDEO", "1") == "1")
+    elif config.data_dir() == config.REAL_DIR.resolve():
+        os.environ.setdefault("DATA_DIR", str(config.REAL_DIR))      # real data: mosaico_io/worldmodels read the same dir
 
     app = FastAPI(title="Weld Copilot", version="1.0")
     data = DataLayer()
@@ -85,7 +101,7 @@ def create_app() -> FastAPI:
         roots = [config.data_dir().resolve(), config.REPO_ROOT.resolve()]
         if not any(p.is_relative_to(r) for r in roots) or not p.is_file():
             raise HTTPException(404, "not found")
-        if p.suffix.lower() not in (".mp4", ".webm", ".png", ".jpg", ".jpeg", ".json", ".md", ".gif"):
+        if p.suffix.lower() not in (".mp4", ".webm", ".png", ".jpg", ".jpeg", ".json", ".md", ".gif", ".pdf"):
             raise HTTPException(403, "file type not served")
         return FileResponse(p)
 
@@ -104,15 +120,18 @@ def create_app() -> FastAPI:
         mos = mosaico_health()
         agent = app.state.agent
         gen_dir = config.generated_dir()
+        dm = data.data_mode()
         return {
             "time": time.time(),
             "mode": cos.get("mode_label") or mode_label(),
             "llm": {"backend": agent.name, "label": agent.label},
             "data_dir": str(config.data_dir()),
             "fixtures": config.fixtures_enabled(),
+            "data": dm,
             "stages": [
-                {"id": "collect", "name": "Collect", "status": "ok" if passes else "empty",
-                 "detail": f"{len(passes)} passes" + (" (fixtures)" if config.fixtures_enabled() else ""),
+                {"id": "collect", "name": "Real data" if dm["real"] else "Collect", "status": "ok" if passes else "empty",
+                 "detail": f"{len(passes)} passes" + (f" · {' + '.join(dm['short'])}" if dm["real"] else "")
+                           + (" (fixtures)" if config.fixtures_enabled() else ""),
                  "metric": len(passes),
                  "sub": f"{sum(1 for d in gen_dir.iterdir() if d.is_dir()) if gen_dir.exists() else 0} pass dirs"},
                 {"id": "mosaico", "name": "Mosaico", "status": mos["status"], "detail": mos["short"],
@@ -135,10 +154,10 @@ def create_app() -> FastAPI:
     # -------------------------------------------------------------- passes
     @app.get("/api/passes")
     def passes(process: str | None = None, spool_id: str | None = None, has_defect: bool | None = None,
-               rt_result: str | None = None):
+               rt_result: str | None = None, source: str | None = None, defect: str | None = None):
         rows = data.list_passes(process=process, spool_id=spool_id, has_defect=has_defect, rt_result=rt_result,
-                                with_violations=True)
-        return {"passes": rows, "source": data.last_source}
+                                source=source, defect=defect, with_violations=True)
+        return clean_json({"passes": rows, "source": data.last_source, "data": data.data_mode()})
 
     @app.get("/api/passes/{seq}")
     def pass_detail(seq: str):
@@ -147,10 +166,11 @@ def create_app() -> FastAPI:
             raise HTTPException(404, f"unknown pass {seq}")
         row = data.get_pass(seq) or {}
         s2r = [g for g in jobs.gallery() if g.get("kind") == "sim2real" and g.get("sequence_name") == seq]
-        return {"sequence_name": seq, "pass": row, "meta": meta, "wps": data.wps_limits(seq),
-                "violations": data.wps_violations(seq), "events": data.events(seq),
-                "defect_windows": data.defect_windows(seq), "media": data.media(seq),
-                "sim2real": s2r[0] if s2r else None}
+        return clean_json({"sequence_name": seq, "pass": row, "meta": meta, "wps": data.wps_limits(seq),
+                           "violations": data.wps_violations(seq), "events": data.events(seq),
+                           "defect_windows": data.defect_windows(seq), "media": data.media(seq),
+                           "source": data.source(seq), "ndt": data.ndt(seq), "wps_basis": meta.get("wps_basis"),
+                           "signal_notes": data.signal_notes(seq), "sim2real": s2r[0] if s2r else None})
 
     @app.get("/api/passes/{seq}/signals")
     def signals(seq: str, hz: float = Query(25.0, gt=0, le=100), t0: float | None = None, t1: float | None = None):
@@ -161,9 +181,16 @@ def create_app() -> FastAPI:
         src_hz = 1.0 / max(float(df["t_s"].diff().median() or 0.01), 1e-3)
         step = max(1, int(round(src_hz / hz)))
         d = df.iloc[::step]
-        series = {p: [None if v != v else round(float(v), 4) for v in d[p].values] for p in SIGNALS if p in d.columns}
-        return {"sequence_name": seq, "t": [round(float(x), 3) for x in d["t_s"].values], "series": series,
-                "info": SIGNAL_INFO, "wps": data.wps_limits(seq)}
+        series = {p: [None if v != v else round(float(v), 4) for v in d[p].values] for p in SIGNALS
+                  if p in d.columns and d[p].notna().any()}
+        meta = data.get_meta(seq)
+        return clean_json({"sequence_name": seq, "t": [round(float(x), 3) for x in d["t_s"].values], "series": series,
+                           "info": SIGNAL_INFO, "wps": data.wps_limits(seq), "wps_basis": meta.get("wps_basis"),
+                           "notes": data.signal_notes(seq), "electrodes": int(meta.get("electrodes") or 1)})
+
+    @app.get("/api/sources")
+    def sources():
+        return data.sources_summary()
 
     # -------------------------------------------------------------- dataset
     @app.get("/api/dataset")
@@ -269,7 +296,8 @@ def create_app() -> FastAPI:
 
     @app.get("/api/suggestions")
     def suggestions():
-        return {"demo": DEMO_FLOW}
+        dm = data.data_mode()
+        return {"demo": DEMO_FLOW_REAL if dm["real"] else DEMO_FLOW, "data": dm}
 
     @app.post("/api/chat")
     async def chat(body: dict = Body(...)):

@@ -571,21 +571,21 @@ def test_warm_cache_end_to_end(monkeypatch, tmp_path, fake_mp4, sidecar):
     rep = warm_cache(manifest, preset="smoke", log=lambda m: None)
     assert [a["clip_id"] for a in rep["assess"]] == ["c1", "c2"]
     assert all(a["source"] == "cosmos3-local" for a in rep["assess"]), rep
-    assert set(rep["what_if"]) == {"baseline-fcaw-fill", "travel_speed_-20", "gas_loss", "porosity", "voltage_+20",
-                                   "interpass_hot", "root-burn-through", "continue-clip"}
-    assert set(rep["transfer"]) == {"sim2real-edge", "sim2real-depth", "sim2real-edge-depth-porosity"}
+    assert set(rep["what_if"]) == {"baseline-tgmaw-fill", "travel_speed_-20", "gas_loss", "porosity", "voltage_+20",
+                                   "interpass_hot", "saw-porosity", "continue-clip"}
+    assert set(rep["transfer"]) == {"transfer-edge-bam", "transfer-edge-bam-porosity"}
     assert not rep["errors"], rep["errors"]
-    assert rep["what_if"]["gas_loss"]["image"].endswith("c1_first.png")   # auto:porosity -> c1
+    assert rep["what_if"]["gas_loss"]["image"].endswith("c1_first.png")   # auto:porosity -> c1 (simulator row)
 
     # the copilot, in replay mode with no GPU, gets the same Cosmos outputs back
     monkeypatch.setenv("COSMOS_BACKEND", "replay")
     set_transport(None)
     res = reason.assess_clip(str(c1), {**sidecar, "clip_id": "c1"})
     assert res["source"] == "cache" and res["origin_source"] == "cosmos3-local"
-    assert get_showcase("sim2real-edge")["source"] == "cosmos3-local"
-    assert Path(list_showcase()["what_if"]["root-burn-through"]["path"]).exists()
+    assert get_showcase("transfer-edge-bam")["source"] == "cosmos3-local"
+    assert Path(list_showcase()["what_if"]["saw-porosity"]["path"]).exists()
     st = cache.stats()["functions"]
-    assert st["assess_clip"]["json"] == 2 and st["what_if"]["media"] == 8 and st["sim2real"]["media"] == 3
+    assert st["assess_clip"]["json"] == 2 and st["what_if"]["media"] == 8 and st["sim2real"]["media"] == 2
     # a copilot-style request (template text, its own frame) replays the showcase clip
     from PIL import Image
     own = tmp_path / "copilot_frame.png"

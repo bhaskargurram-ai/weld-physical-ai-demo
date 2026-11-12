@@ -59,20 +59,33 @@ def _resolve_model(api: str, model: str, headers: dict, s: Settings) -> str:
     return mid
 
 
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
+
+
+def is_image(path: Optional[str]) -> bool:
+    """Media kind by extension: photos (bead photos, extracted frames) vs video clips."""
+    return bool(path) and Path(str(path)).suffix.lower() in IMAGE_EXTS
+
+
 def _video_url(video_path: str, backend: str, s: Settings) -> str:
     mode = s.reasoner_video_mode
     if mode == "auto":
         mode = "file" if backend == "local" and is_local_url(s.reasoner_url) else "base64"
     if mode == "file":
         return Path(video_path).resolve().as_uri()
-    return data_url(video_path, "video/mp4")
+    return data_url(video_path, "image/jpeg" if is_image(video_path) else "video/mp4")
 
 
-def _user_content(text: str, video_url: Optional[str]) -> Any:
+def _media_part(url: str, image: bool) -> dict:
+    """OpenAI content part: ``image_url`` for photos, ``video_url`` for clips (vLLM / NIM extension)."""
+    return {"type": "image_url", "image_url": {"url": url}} if image else {"type": "video_url", "video_url": {"url": url}}
+
+
+def _user_content(text: str, video_url: Optional[str], image: bool = False) -> Any:
     if not video_url:
         return text
     # Cosmos3 prompt guide: media BEFORE the text prompt.
-    return [{"type": "video_url", "video_url": {"url": video_url}}, {"type": "text", "text": text}]
+    return [_media_part(video_url, image), {"type": "text", "text": text}]
 
 
 def _post_chat(backend: str, s: Settings, messages: list, *, sampling: dict, has_video: bool,
@@ -120,17 +133,19 @@ def _post_chat(backend: str, s: Settings, messages: list, *, sampling: dict, has
 
 # ------------------------------------------------------------------ assess_clip
 def assess_inputs(video_path: str, context: Optional[dict], s: Optional[Settings] = None) -> tuple[dict, str, str]:
-    """Cache-key inputs, system prompt and user text for an assessment."""
+    """Cache-key inputs, system prompt and user text for an assessment (key on the media file's sha256)."""
     s = s or get_settings()
-    text = build_assess_text(context, think=s.reasoner_think, include_labels=s.include_labels_in_prompt)
-    inputs = {"video": cache.FileRef(str(video_path)), "system": CWI_SYSTEM_PROMPT, "prompt": text,
-              "think": s.reasoner_think, "prompt_version": PROMPT_VERSION}
+    img = is_image(video_path)
+    text = build_assess_text(context, think=s.reasoner_think, include_labels=s.include_labels_in_prompt,
+                             media="image" if img else "video")
+    inputs = {"image" if img else "video": cache.FileRef(str(video_path)), "system": CWI_SYSTEM_PROMPT,
+              "prompt": text, "think": s.reasoner_think, "prompt_version": PROMPT_VERSION}
     return inputs, CWI_SYSTEM_PROMPT, text
 
 
 def _video_alias(video_path: str) -> Optional[str]:
     try:
-        return cache.alias_key("video", cache.file_sha256(video_path))
+        return cache.alias_key("image" if is_image(video_path) else "video", cache.file_sha256(video_path))
     except OSError:
         return None
 
@@ -163,8 +178,14 @@ def _from_cache(rec: dict, *, t0: float, key: str, context: Optional[dict], matc
                    origin_source=rec.get("source"), origin_latency_ms=rec.get("latency_ms"), cache_match=match)
 
 
+def assess_image(image_path: str, context: Optional[dict] = None, *, backend: Optional[str] = None) -> dict:
+    """Weld-quality assessment of one photo (e.g. an AIMEN post-weld bead photo); same result as
+    :func:`assess_clip`, which auto-detects images by extension anyway."""
+    return assess_clip(image_path, context, backend=backend)
+
+
 def assess_clip(video_path: str, context: Optional[dict] = None, *, backend: Optional[str] = None) -> dict:
-    """Weld-quality assessment of one clip.
+    """Weld-quality assessment of one clip or photo (``.jpg/.png`` -> sent as ``image_url``).
 
     Returns ``{verdict: accept|reject|review, defects: [{type, confidence, t_s}], root_cause,
     wps_findings: [{param, status, note}], recommended_action, reasoning, code_basis,
@@ -189,7 +210,8 @@ def assess_clip(video_path: str, context: Optional[dict] = None, *, backend: Opt
         else:
             try:
                 res = _assess_remote(video_path, system, text, b, s)
-                out = _finish(res, source=backend_source(b), t0=t0, key=key, context=context, backend=b)
+                out = _finish(res, source=backend_source(b), t0=t0, key=key, context=context, backend=b,
+                              media_type="image" if is_image(video_path) else "video")
                 if cache.writing_enabled():
                     cache.put_json(FN_ASSESS, key, {**out, "context": context, "prompt": text},
                                    aliases=[alias] if alias else [])
@@ -206,13 +228,15 @@ def assess_clip(video_path: str, context: Optional[dict] = None, *, backend: Opt
         if rec:
             return _from_cache(rec, t0=t0, key=key, context=context, match="same-video")
     res = heuristics.assess(context)
-    return _finish(res, source=SOURCE_HEURISTIC, t0=t0, key=key, context=context, backend=b, error=error)
+    return _finish(res, source=SOURCE_HEURISTIC, t0=t0, key=key, context=context, backend=b, error=error,
+                   media_type="image" if is_image(video_path) else "video")
 
 
 def _assess_remote(video_path: str, system: str, text: str, backend: str, s: Settings) -> dict:
     vurl = _video_url(video_path, backend, s)
+    img = is_image(video_path)
     messages: list[dict] = [{"role": "system", "content": system},
-                            {"role": "user", "content": _user_content(text, vurl)}]
+                            {"role": "user", "content": _user_content(text, vurl, img)}]
     attempts: list[dict] = []
     last_err: Optional[Exception] = None
     sampling = SAMPLING_REASONING if s.reasoner_think else SAMPLING_DIRECT
@@ -231,11 +255,11 @@ def _assess_remote(video_path: str, system: str, text: str, backend: str, s: Set
             ]
         if guided:
             no_think_text = text.split("\n\nAnswer the question using the following format:")[0]
-            msgs = [messages[0], {"role": "user", "content": _user_content(no_think_text, vurl)}]
+            msgs = [messages[0], {"role": "user", "content": _user_content(no_think_text, vurl, img)}]
             fmt = {"type": "json_schema", "json_schema": {"name": "weld_assessment", "schema": ASSESS_JSON_SCHEMA}}
             samp = SAMPLING_DIRECT
         try:
-            content, reasoning, info = _post_chat(backend, s, msgs, sampling=samp, has_video=True, response_format=fmt)
+            content, reasoning, info = _post_chat(backend, s, msgs, sampling=samp, has_video=not img, response_format=fmt)
         except BackendError as e:
             last_err = e
             attempts.append({"attempt": i + 1, "error": str(e)[:300], "content": ""})
@@ -259,7 +283,7 @@ def _assess_remote(video_path: str, system: str, text: str, backend: str, s: Set
 
 
 # ------------------------------------------------------------------ chat / explain
-def _normalise_messages(messages: list, video_url: Optional[str]) -> list:
+def _normalise_messages(messages: list, video_url: Optional[str], image: bool = False) -> list:
     msgs = [dict(m) for m in messages]
     if not any(m.get("role") == "system" for m in msgs):
         msgs.insert(0, {"role": "system", "content": CWI_SYSTEM_PROMPT})
@@ -268,19 +292,23 @@ def _normalise_messages(messages: list, video_url: Optional[str]) -> list:
             if m.get("role") == "user":
                 content = m.get("content")
                 parts = content if isinstance(content, list) else [{"type": "text", "text": str(content or "")}]
-                m["content"] = [{"type": "video_url", "video_url": {"url": video_url}}] + [
-                    p for p in parts if p.get("type") != "video_url"]
+                m["content"] = [_media_part(video_url, image)] + [
+                    p for p in parts if p.get("type") not in ("video_url", "image_url")]
                 break
     return msgs
 
 
 def chat_meta(messages: list, video_path: Optional[str] = None, *, backend: Optional[str] = None,
-              think: bool = False) -> dict:
-    """Like :func:`chat` but returns ``{text, reasoning, source, latency_ms, ...}``."""
+              think: bool = False, image_path: Optional[str] = None) -> dict:
+    """Like :func:`chat` but returns ``{text, reasoning, source, latency_ms, ...}``.
+    ``image_path`` (or a ``video_path`` with an image extension) sends a photo as ``image_url``."""
     t0 = time.perf_counter()
     s = get_settings()
-    inputs = {"messages": messages, "video": cache.FileRef(video_path) if video_path else None, "think": think,
-              "system": CWI_SYSTEM_PROMPT}
+    if image_path and not video_path:
+        video_path = image_path
+    img = is_image(video_path)
+    inputs = {"messages": messages, ("image" if img else "video"): cache.FileRef(video_path) if video_path else None,
+              "think": think, "system": CWI_SYSTEM_PROMPT}
     key = cache.make_key(FN_CHAT, inputs)
     b = backend or resolve_backend("reasoner", s)
     ms = lambda: int(round((time.perf_counter() - t0) * 1000))  # noqa: E731
@@ -293,7 +321,7 @@ def chat_meta(messages: list, video_path: Optional[str] = None, *, backend: Opti
     if b in ("local", "nim"):
         try:
             vurl = _video_url(video_path, b, s) if video_path else None
-            msgs = _normalise_messages(messages, vurl)
+            msgs = _normalise_messages(messages, vurl, img)
             if think and msgs and msgs[-1].get("role") == "user":
                 from .prompts import THINK_SUFFIX
                 last = msgs[-1]
@@ -302,7 +330,7 @@ def chat_meta(messages: list, video_path: Optional[str] = None, *, backend: Opti
                 else:
                     last["content"] = f"{last['content']}\n\n{THINK_SUFFIX}"
             content, reasoning, info = _post_chat(b, s, msgs, sampling=SAMPLING_REASONING if think else SAMPLING_DIRECT,
-                                                  has_video=bool(video_path))
+                                                  has_video=bool(video_path) and not img)
             think_txt, answer = split_think(content)
             out = {"text": answer or content, "reasoning": reasoning or think_txt, "source": backend_source(b),
                    "latency_ms": ms(), "model": info["model"], "cache_key": key}
@@ -329,10 +357,10 @@ def chat_meta(messages: list, video_path: Optional[str] = None, *, backend: Opti
     return {"text": text, "reasoning": "", "source": SOURCE_HEURISTIC, "latency_ms": ms(), "error": error}
 
 
-def chat(messages: list, video_path: Optional[str] = None) -> str:
+def chat(messages: list, video_path: Optional[str] = None, image_path: Optional[str] = None) -> str:
     """Free-form Cosmos3 Reasoner chat (OpenAI-style ``messages``); returns the answer text
     with any ``<think>`` block removed. Use :func:`chat_meta` for source/latency/reasoning."""
-    return chat_meta(messages, video_path)["text"]
+    return chat_meta(messages, video_path, image_path=image_path)["text"]
 
 
 def explain_signals_meta(context: Optional[dict], *, backend: Optional[str] = None) -> dict:

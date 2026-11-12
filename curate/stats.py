@@ -43,6 +43,19 @@ def summarize(rows: list[dict[str, Any]], backend: str | None = None) -> dict[st
         if vals:
             q[k] = {"median": round(median(vals), 4), "min": round(min(vals), 4), "max": round(max(vals), 4)}
 
+    sources: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        src = r.get("source") if isinstance(r.get("source"), dict) else {}
+        sid = str(src.get("id") or "unknown")
+        e = sources.setdefault(sid, {"license": src.get("license"), "attribution": src.get("attribution"),
+                                     "doi": src.get("doi"), "url": src.get("url"),
+                                     "synthetic": src.get("synthetic"), "items": 0, "kept": 0,
+                                     "video": 0, "image": 0})
+        e["items"] += 1
+        e["kept"] += int(bool(r.get("kept")))
+        mt = r.get("media_type") or "video"
+        e[mt] = e.get(mt, 0) + 1
+
     return {
         "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "backend": backend,
@@ -64,6 +77,9 @@ def summarize(rows: list[dict[str, Any]], backend: str | None = None) -> dict[st
         "pass_type_kept": dict(Counter(str((r.get("sensor_summary") or {}).get("pass_type", "unknown"))
                                        for r in kept).most_common()),
         "caption_models": dict(Counter(r.get("caption_model") or "none" for r in rows).most_common()),
+        "media_type_kept": dict(Counter(r.get("media_type") or "video" for r in kept).most_common()),
+        "media_type_all": dict(Counter(r.get("media_type") or "video" for r in rows).most_common()),
+        "sources": sources,
         "quality": q,
     }
 
@@ -77,6 +93,43 @@ def _table(d: dict, h1: str, h2: str, total: int | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _sources_section(s: dict[str, Any]) -> list[str]:
+    src = s.get("sources") or {}
+    if not src:
+        return []
+    out = ["## Sources, licenses and attribution", "",
+           "| source | license | items (video / photo) | kept |", "|---|---|---:|---:|"]
+    for sid, e in src.items():
+        out.append(f"| `{sid}` | {e.get('license') or 'unknown'} | {e['items']} ({e.get('video', 0)} / "
+                   f"{e.get('image', 0)}) | {e['kept']} |")
+    out.append("")
+    for sid, e in src.items():
+        att = e.get("attribution") or sid
+        link = f" <{e['url']}>" if e.get("url") else ""
+        out.append(f"- **{sid}**: {att}{link}")
+    if any(not e.get("synthetic") and "BY" in str(e.get("license") or "") for e in src.values()):
+        out += ["", "CC BY 4.0 data: redistribution and derived works (clips, photos, captions, model outputs) "
+                    "must keep this attribution."]
+    out.append("")
+    return out
+
+
+def _intro(s: dict[str, Any]) -> str:
+    src = s.get("sources") or {}
+    real = [k for k, e in src.items() if not e.get("synthetic") and k != "unknown"]
+    if not real:
+        return ("Torch-camera clips from robotic pipe-spool welding passes (GTAW root, FCAW fill/cap per WPS), "
+                "cut to fixed 5 s windows, H.264 transcoded, quality-filtered (blur, motion, arc glare, exposure), "
+                "near-duplicate filtered, captioned in CWI style and joined with arc/travel/thermal sensor "
+                "statistics, WPS deviations, defect labels and RT results.")
+    return ("Real, public welding data (" + ", ".join(f"`{k}`" for k in real) + "): 5 s windows around NDT "
+            "indications plus clean windows. Passes with process-camera video give H.264 clips; passes without "
+            "video (SAW) give the post-weld bead photo as an image item. Each item is quality-filtered, "
+            "near-duplicate filtered, captioned from what the data records (no invented visuals) and joined "
+            "with the arc/travel/thermal statistics of its window, deviations from the nominal parameter window "
+            "(published setting ±10 %, a demo assumption, not a qualified WPS) and the NDT result.")
+
+
 def render_card(s: dict[str, Any]) -> str:
     kept_pct = 100 * s["clips_kept"] / s["clips_total"] if s["clips_total"] else 0
     out = [
@@ -84,11 +137,9 @@ def render_card(s: dict[str, Any]) -> str:
         "",
         f"Generated {s['generated_utc']} by `curate` (backend: `{s.get('backend') or 'unknown'}`).",
         "",
-        "Torch-camera clips from robotic pipe-spool welding passes (GTAW root, FCAW fill/cap per WPS), "
-        "cut to fixed 5 s windows, H.264 transcoded, quality-filtered (blur, motion, arc glare, exposure), "
-        "near-duplicate filtered, captioned in CWI style and joined with arc/travel/thermal sensor "
-        "statistics, WPS deviations, defect labels and RT results.",
+        _intro(s),
         "",
+        *_sources_section(s),
         "## Summary",
         "",
         "| metric | value |",
@@ -100,6 +151,7 @@ def render_card(s: dict[str, Any]) -> str:
         f"| hours kept | {s['hours_kept']:.3f} ({s['hours_kept'] * 60:.1f} min) |",
         f"| weld passes (sequences) kept / total | {s['sequences_kept']} / {s['sequences']} |",
         f"| kept clips with a WPS deviation | {s['clips_with_wps_violation_kept']} |",
+        f"| kept items by media type | {', '.join(f'{k}: {v}' for k, v in (s.get('media_type_kept') or {}).items()) or '-'} |",
         "",
         "## Rejected clips by reason",
         "",
@@ -135,7 +187,7 @@ def render_card(s: dict[str, Any]) -> str:
         "",
         "- `manifest.jsonl`: one row per clip (caption, sensor summary, WPS violations, defects, quality, "
         "kept/reject_reason, Cosmos 3 generator prompt)",
-        "- `clips/<clip_id>.mp4`: H.264 clips",
+        "- `clips/<clip_id>.mp4`: H.264 clips; `clips/<clip_id>.jpg`: bead photos (image items)",
         "- `lance/`: Curator-Next-schema Lance table (clip_id, clip_uri, start_ns, end_ns, caption_*, embedding_*)",
         "- `prompts/<clip_id>.json`: Cosmos 3 prompt variants (photoreal_transfer, what_if_travel_speed, "
         "what_if_gas_loss, defect_synthesis)",

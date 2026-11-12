@@ -28,8 +28,8 @@ from curate.common import defect_name, normalize_signal_stats
 VARIANTS = ("photoreal_transfer", "what_if_travel_speed", "what_if_gas_loss", "defect_synthesis")
 
 WELD_CAPTION_PROMPT = (
-    "You are an AWS Certified Welding Inspector (CWI) reviewing footage from a torch-mounted camera "
-    "in a robotic pipe-spool and pressure-vessel weld cell. Describe this clip in one dense paragraph "
+    "You are an AWS Certified Welding Inspector (CWI) reviewing footage from a weld-process camera "
+    "(torch-mounted or fixed, colour or grayscale HDR) in a robotic weld cell. Describe this clip in one dense paragraph "
     "of 4 to 7 sentences, as an inspection note that could train a video model. Cover, in order: "
     "1) the camera view and what is in frame (torch nozzle, electrode or wire, arc, weld pool, joint "
     "bevel, previous passes, pipe surface); 2) the welding process you can infer (GTAW with a tungsten "
@@ -42,6 +42,17 @@ WELD_CAPTION_PROMPT = (
     "arc wander or instability; 6) lighting and image quality, including saturation from arc glare. "
     "Be specific and physical, state only what is visible, use inspection vocabulary, and do not "
     "invent part numbers or measurements that cannot be seen."
+)
+
+WELD_PHOTO_CAPTION_PROMPT = (
+    "You are an AWS Certified Welding Inspector (CWI) doing a visual examination of a post-weld photo of a "
+    "completed weld bead. Describe the photo in one dense paragraph of 3 to 6 sentences, as an inspection note "
+    "that could train a vision model. Cover: 1) what is in frame (bead, toes, base metal, slag or flux "
+    "residue, scale, markings); 2) bead geometry: width uniformity, ripple pattern, reinforcement, wetting at "
+    "the toes; 3) any visible surface discontinuity: surface pores or pinholes, undercut, overlap, cracks, "
+    "spatter, irregular bead; 4) lighting and image quality. State only what is visible in the photo; "
+    "subsurface indications reported by RT/UT may not be visible - say so instead of inventing them. Do not "
+    "invent measurements."
 )
 
 NEGATIVE_PROMPT: dict[str, Any] = {
@@ -108,6 +119,28 @@ PROCESS_DESC: dict[str, dict[str, str]] = {
     },
 }
 
+# Real public datasets (docs/REAL_DATA.md): what the data actually shows, used instead of the simulator's
+# visual process cues so captions / prompts never invent visuals the footage does not have.
+SOURCE_DESC: dict[str, dict[str, Any]] = {
+    "aimen_saw": {
+        "setup": "two-wire tandem submerged arc welding (DC lead + AC trail electrode) of a 52 mm SA-516 Gr.70N "
+                 "butt-weld coupon (AIMEN, PENELOPE project)",
+        "unit": "bead",
+        "camera": None,
+        "photo": "Post-weld photo of the complete SAW bead",
+        "scene": "a submerged-arc welding head with two wires feeding into a granular flux blanket on a thick "
+                 "carbon-steel plate butt joint; the arc is hidden under the flux",
+    },
+    "bam_tgmaw": {
+        "setup": "tandem GMAW (lead + trail wire; root layer single wire) in a 30 mm S355J2+N groove (BAM)",
+        "unit": "layer",
+        "camera": "HDR process camera footage, grayscale, with the BAM data overlay",
+        "photo": None,
+        "scene": "a tandem GMAW torch with two wires depositing a fill layer in a deep V-groove of a thick "
+                 "structural-steel plate, seen by a grayscale high-dynamic-range process camera",
+    },
+}
+
 POSITION_DESC = {
     "1G": "the pipe is rolled on a positioner under a stationary torch in the flat position, so the "
           "surface scrolls steadily through the frame",
@@ -156,7 +189,13 @@ def _ctx(clip: dict[str, Any]) -> dict[str, Any]:
     t1 = clip.get("t1_s")
     dur = max(1.0, float(t1) - t0) if t1 is not None else 5.0
     proc = str(meta.get("process") or clip.get("process") or "FCAW").upper()
+    src = clip.get("source") if isinstance(clip.get("source"), dict) else \
+        (meta.get("source") if isinstance(meta.get("source"), dict) else {})
     return {
+        "source_id": src.get("id"), "synthetic": bool(src.get("synthetic", not src)),
+        "media_type": clip.get("media_type") or "video",
+        "electrodes": int(meta.get("electrodes") or clip.get("electrodes") or 1),
+        "thickness": meta.get("thickness_mm"),
         "process": proc if proc in PROCESS_DESC else "FCAW",
         "position": str(meta.get("position") or clip.get("position") or "1G"),
         "material": str(meta.get("material") or "A106 Gr.B carbon steel"),
@@ -188,6 +227,10 @@ def build_generator_prompt(clip: dict[str, Any], variant: str = "photoreal_trans
     pipe = c["material"] + " pipe"
     if c["od"] and c["wall"]:
         pipe = f"{c['material']} pipe ({float(c['od']):.0f} mm OD, {float(c['wall']):.1f} mm wall)"
+    real = not c["synthetic"]
+    sdesc = SOURCE_DESC.get(str(c["source_id"]), {}) if real else {}
+    if real:
+        pipe = f"{c['material']} plate" + (f" ({float(c['thickness']):.0f} mm thick)" if c["thickness"] else "")
     pos = POSITION_DESC.get(c["position"], POSITION_DESC["1G"])
     defects = [defect_name(d) for d in c["defects"]]
 
@@ -199,10 +242,19 @@ def build_generator_prompt(clip: dict[str, Any], variant: str = "photoreal_trans
                "Section IX / B31.3 fabrication shop, filmed by a torch-mounted inspection camera")
     style_extra = ""
 
+    if real:
+        context = (f"Robotic {c['pass_type']} {sdesc.get('unit', 'pass')} by "
+                   f"{'tandem ' if c['electrodes'] > 1 else ''}{p['name']} on {pipe}"
+                   + (f": {sdesc['scene']}" if sdesc.get("scene") else ""))
     if variant == "photoreal_transfer":
-        context += "; photoreal re-rendering of a simulated weld for sim-to-real training data"
-        style_extra = ("Must look like real shop footage from a filtered weld camera, preserving the exact "
-                       "geometry, torch path and timing of the control video.")
+        if real:
+            context += "; colour photoreal re-rendering that follows the edge map of the real process-camera clip"
+            style_extra = ("Must look like real shop footage, preserving the exact geometry, torch path and "
+                           "timing of the control video.")
+        else:
+            context += "; photoreal re-rendering of a simulated weld for sim-to-real training data"
+            style_extra = ("Must look like real shop footage from a filtered weld camera, preserving the exact "
+                           "geometry, torch path and timing of the control video.")
         for d in defects:
             narrative.append(f"{d.replace('_', ' ').capitalize()} develops: {DEFECT_VISUAL.get(d, d)}.")
         if narrative:
@@ -276,22 +328,27 @@ def build_generator_prompt(clip: dict[str, Any], variant: str = "photoreal_trans
                 "number_of_subjects": 1, "number_of_arms": 0, "number_of_legs": 0,
             },
             {
-                "description": f"{pipe} with a beveled butt joint and earlier passes visible in the groove.",
+                "description": f"{pipe} with a {'deep groove' if real else 'beveled butt joint'} and earlier "
+                               "passes visible in the groove.",
                 "appearance_details": ("Mill-scale grey steel with a ground bright bevel, rainbow heat tint "
                                        "bands beside the weld, slag-free previous passes."),
                 "relationship": "Workpiece being welded",
                 "location": "Fills the lower two thirds of the frame",
                 "relative_size": "Large within frame",
                 "orientation": "Joint runs top-to-bottom through the frame",
-                "pose": "", "action": pos, "state_changes": "Bead length grows steadily.",
+                "pose": "", "action": "The plate is fixed while the robot moves the torch along the joint"
+                if real else pos, "state_changes": "Bead length grows steadily.",
                 "clothing": "", "expression": "", "gender": "", "age": "",
                 "skin_tone_and_texture": "", "facial_features": "",
                 "number_of_subjects": 1, "number_of_arms": 0, "number_of_legs": 0,
             },
         ],
-        "background_setting": ("Inside a robotic weld cell of a pipe-spool fabrication shop: the curved pipe "
-                               "surface fills the view, with a dark blurred cell interior, a positioner chuck "
-                               "and grey welding curtains far behind; drifting fume catches the arc light."),
+        "background_setting": (("Inside a robotic welding laboratory cell: the thick steel plate with its groove "
+                                "fills the view, clamped to a welding table, with a dark blurred cell interior "
+                                "behind; drifting fume catches the arc light.") if real else
+                               ("Inside a robotic weld cell of a pipe-spool fabrication shop: the curved pipe "
+                                "surface fills the view, with a dark blurred cell interior, a positioner chuck "
+                                "and grey welding curtains far behind; drifting fume catches the arc light.")),
         "lighting": {
             "conditions": "The welding arc is the dominant, extremely bright light source; ambient shop light is dim",
             "direction": "Point source at the arc, lighting the pipe from the center outward",
@@ -341,6 +398,7 @@ def build_generator_prompt(clip: dict[str, Any], variant: str = "photoreal_trans
         "weld_metadata": {
             "variant": variant, "process": c["process"], "position": c["position"],
             "pass_type": c["pass_type"], "material": c["material"], "defects": defects,
+            "source_id": c["source_id"], "electrodes": c["electrodes"],
         },
     }
     return prompt
