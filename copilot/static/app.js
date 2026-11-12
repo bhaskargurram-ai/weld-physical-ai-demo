@@ -54,6 +54,7 @@ function showTab(name) {
   $$(".tab-pane").forEach((p) => p.classList.toggle("active", p.id === `tab-${name}`));
   if (name === "dataset") loadDataset();
   if (name === "generate") loadGenerate();
+  if (name === "flow") loadFlow();
   if (name === "copilot") requestAnimationFrame(resizeCharts);
   location.hash = name === "copilot" ? "" : name;
 }
@@ -845,6 +846,131 @@ async function loadGallery() {
 }
 
 /* ===================================================================== boot */
+/* ===================================================================== how it works */
+const FLOW_STATUS = {
+  live: ["ok", "Live"], cached: ["arc", "Cosmos 3 · cached"], rule: ["warn", "Rule-based"], cpu: ["warn", "CPU fallback"],
+  offline: ["neutral", "Offline files"], sim: ["molten", "Simulated"], empty: ["neutral", "No data yet"], ok: ["ok", "Done"],
+};
+const fBadge = (k, txt) => { const [c, l] = FLOW_STATUS[k] || ["neutral", k]; return h("span", { class: `badge ${c}` }, txt || l); };
+const plural = (n, w, pl = /(s|sh|ch|x)$/.test(w) ? `${w}es` : `${w}s`) => `${n} ${n === 1 ? w : pl}`;
+
+async function loadFlow() {
+  const root = $("#flow");
+  let f;
+  try { f = await api("/api/flow"); } catch (e) { root.innerHTML = `<div class="placeholder">Could not load: ${esc(e.message)}</div>`; return; }
+  const c = f.collect, m = f.mosaico, x = f.export, cu = f.curate, co = f.cosmos;
+  const realR = co.assess.real, realG = co.what_if.real, realT = co.sim2real.real;
+  const curReal = cu.backend && cu.backend.startsWith("curator");
+
+  const stages = [
+    { id: "collect", tab: "copilot", n: 1, title: "Weld cell sensors", tech: "WeldCell simulator",
+      does: ["Robotic pipe-spool & vessel passes (GTAW root, FCAW fill/cap, SAW seam)",
+             "Arc current/voltage, wire feed, gas @100 Hz · robot joints @50 Hz · IR interpass @10 Hz · torch camera 24 fps",
+             "Defects injected with their physical signature; each pass gets an RT (X-ray) result"],
+      big: c.passes, unit: "weld passes", foot: `${c.defect_passes} with defects · ${c.rt_reject} RT rejects · ${c.spools.join(", ")}`,
+      status: c.passes ? (c.fixtures ? "sim" : "sim") : "empty",
+      statusText: c.fixtures ? "Mock fixtures" : "Simulated data" },
+    { id: "mosaico", tab: "copilot", n: 2, title: "Store & query by physics", tech: "Mosaico",
+      does: ["One typed sequence per pass: custom WeldArc / WeldTravel / WeldThermal ontology + JPEG camera topic",
+             "Query on physical values, e.g. gas_lpm < 12, current over WPS max",
+             "Synchronised 5 s windows exported with sensor sidecars"],
+      big: x.clips || m.sequences, unit: x.clips ? "clips exported" : "sequences",
+      foot: `${plural(m.wps_break, "pass")} broke the WPS · ${x.defect_clips} defect windows`,
+      status: m.status === "ok" ? "live" : "offline", statusText: m.status === "ok" ? "mosaicod live" : "Offline files" },
+    { id: "curator", tab: "dataset", n: 3, title: "Curate training data", tech: "NVIDIA Cosmos Curator",
+      does: ["Cut → transcode → quality filter (blur, motion, arc glare) → near-duplicate removal",
+             "Caption every clip like a welding inspector; embed for search",
+             "Write a Cosmos 3 prompt per clip for what-if / sim→real"],
+      big: cu.kept, unit: `of ${cu.total} clips kept`,
+      foot: (Object.entries(cu.reasons).map(([k, v]) => `${v} ${String(k).replace(/_/g, " ")}`).join(" · ") || "nothing rejected")
+        + (cu.total && !curReal ? " · Cosmos Curator failed, same stages run on CPU" : ""),
+      status: !cu.total ? "empty" : curReal ? "ok" : "cpu",
+      statusText: !cu.total ? null : curReal ? "Cosmos Curator" : "CPU fallback" },
+    { id: "cosmos", tab: "generate", n: 4, title: "World models", tech: "NVIDIA Cosmos 3",
+      sub: [
+        { name: "Reasoner — inspect", what: "Watches a clip + reads the sensor stats → accept / reject / review, defect, root cause, fix",
+          real: realR, fb: co.assess.fallback, live: co.reasoner_live },
+        { name: "Generator — what-if", what: "Image→video: “what if travel speed drops 20 %?”",
+          real: realG, fb: co.what_if.fallback, live: co.generator_live },
+        { name: "Transfer — sim → real", what: "Simulator edge/depth video → photoreal footage, labels carried over",
+          real: realT, fb: co.sim2real.fallback, live: co.generator_live },
+      ] },
+    { id: "copilot", tab: "copilot", n: 5, title: "Ask in plain English", tech: "Weld Copilot",
+      does: ["Chat model calls tools: query passes, WPS check, find anomalies, assess, what-if, sim→real, dataset stats",
+             "Answers cite sequence, time and value vs WPS limit",
+             "Replay jumps to the exact moment in the weld"],
+      big: null, unit: f.copilot.llm, foot: "chat model", status: "live", statusText: f.copilot.llm },
+  ];
+  const flowsOn = ["passes + 4 sensor streams", "5 s clips + sidecars", "captioned clips + prompts", "verdicts + videos"];
+
+  const card = (s) => {
+    const el = h("button", { class: `fl-card fl-${s.id}`, onclick: () => showTab(s.tab), title: `Open the ${s.tab} tab` },
+      h("div", { class: "fl-top" }, h("span", { class: "fl-n" }, s.n), h("span", { class: "fl-title" }, s.title)),
+      h("div", { class: "fl-tech" }, s.tech));
+    if (s.sub) {
+      s.sub.forEach((x) => {
+        const st = x.live ? "live" : x.real ? "cached" : "rule";
+        const txt = x.live ? "Live on GPU" : x.real ? `${x.real} real result${x.real === 1 ? "" : "s"} cached` :
+          (x.name.startsWith("Reasoner") ? "Rule-based stand-in" : "Placeholder video");
+        el.append(h("div", { class: "fl-sub" }, h("div", { class: "fl-sub-h" }, h("b", {}, x.name), fBadge(st, txt)),
+          h("div", { class: "fl-sub-w" }, x.what)));
+      });
+    } else {
+      el.append(h("ul", { class: "fl-does" }, s.does.map((d) => h("li", {}, d))),
+        h("div", { class: "fl-out" }, s.big != null ? h("span", { class: "fl-big" }, s.big) : null, h("span", { class: "fl-unit" }, s.unit)),
+        h("div", { class: "fl-foot" }, s.foot), h("div", { class: "fl-st" }, fBadge(s.status, s.statusText)));
+    }
+    return el;
+  };
+  const lane = h("div", { class: "fl-lane" });
+  stages.forEach((s, i) => {
+    if (i) lane.append(h("div", { class: "fl-arrow" }, h("i", { style: { animationDelay: `${i * 0.35}s` } }), h("span", {}, flowsOn[i - 1])));
+    lane.append(card(s));
+  });
+
+  // follow one weld
+  const e = f.example;
+  let story = null;
+  if (e) {
+    const v = e.violation, sig = v && SIG[v.param];
+    const lim = v ? (v.limit_lo != null && v.limit_hi != null ? `${v.limit_lo}–${v.limit_hi}` : v.limit_hi != null ? `≤ ${v.limit_hi}` : `≥ ${v.limit_lo}`) : "";
+    const steps = [
+      ["Sensors", v ? `${sig ? sig.n : v.param} falls to ${fmt(v.value, 1)} ${sig ? sig.u : ""} at ${fmt(v.t_start_s, 1)} s (WPS ${lim})`
+                    : `${String(e.defect).replace(/_/g, " ")} starts at ${fmt(e.defect_t, 1)} s`],
+      ["Mosaico", v ? `Query ${v.param} ${v.kind === "low" ? "<" : ">"} WPS limit finds this window among ${c.passes} passes` : "Window exported with sensor sidecar"],
+      ["Curator", e.clip_id ? `Clip ${e.clip_id} kept and captioned (${e.caption_model}): “${(e.caption || "").slice(0, 120)}…”` : "Clip not in the curated set"],
+      ["Cosmos 3", e.verdict ? `Reasoner verdict: ${String(e.verdict).toUpperCase()} (${e.verdict_real ? "real Cosmos 3 output" : e.verdict_source})`
+                             : "No Cosmos 3 verdict cached for this clip yet — the copilot shows a rule-based check, labelled as such"],
+      ["Radiography", `RT result on the joint: ${String(e.rt_result).toUpperCase()}`],
+    ];
+    const ask = `Why did ${e.sequence.split("_").slice(0, 2).join(" ")} ${e.pass_type} pass fail RT?`;
+    story = h("section", { class: "fl-story" },
+      h("div", { class: "fl-h" }, h("h3", {}, "Follow one weld through it"),
+        h("span", { class: "sub" }, `${e.sequence} · ${e.process} ${e.pass_type} · ${e.material} · ${e.wps_id}`)),
+      h("ol", { class: "fl-steps" }, steps.map(([k, t], i) => h("li", { class: `fl-step s${i}` }, h("b", {}, k), h("span", {}, t)))),
+      h("button", { class: "btn primary", onclick: () => { showTab("copilot"); sendChat(ask); } }, `Ask the copilot: “${ask}”`));
+  }
+
+  const where = h("section", { class: "fl-where" },
+    h("div", { class: "fl-h" }, h("h3", {}, "Where it runs")),
+    h("div", { class: "fl-hosts" },
+      h("div", { class: "fl-host gpu" }, h("b", {}, "Runpod GPU pod (H100)"),
+        h("span", {}, "Postgres + mosaicod + MinIO · Cosmos Curator (Qwen captioner, Cosmos-Embed) · Cosmos 3 Reasoner (vLLM) · Cosmos 3 Generator (vLLM-Omni)"),
+        h("small", {}, "started by runpod/launch.py, terminates itself when the run ends")),
+      h("div", { class: "fl-arrow v" }, h("i"), h("span", {}, "network volume → download.py")),
+      h("div", { class: "fl-host laptop" }, h("b", {}, "This computer"),
+        h("span", {}, `Weld Copilot in ${co.mode} mode: Cosmos 3 answers come from the cached results of the GPU run`),
+        h("small", {}, "no GPU or internet needed for the cached parts"))),
+    h("div", { class: "fl-legend" }, ["live", "cached", "rule", "cpu", "offline", "sim"].map((k) => fBadge(k))));
+
+  root.innerHTML = "";
+  root.append(
+    h("header", { class: "fl-head" }, h("h2", {}, "How WeldWorld works"),
+      h("p", {}, "From the weld cell to a decision: what each step does, which component does it, and what it produced for this dataset. "
+        + "Click a step to open its tab.")),
+    lane, story, where);
+}
+
 (async function boot() {
   welcome();
   pollHealth();
@@ -860,5 +986,5 @@ async function loadGallery() {
     seek(w ? Math.max(0, w.t_start - 1.5) : 2);
   }
   const tab = location.hash.replace("#", "");
-  if (["dataset", "generate"].includes(tab)) showTab(tab);
+  if (["dataset", "generate", "flow"].includes(tab)) showTab(tab);
 })();

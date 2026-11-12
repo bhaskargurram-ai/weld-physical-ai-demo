@@ -171,3 +171,38 @@ def test_localize_maps_runpod_paths_onto_local_data(tmp_path, monkeypatch):
     assert config.localize("/workspace/weld-physical-ai-demo/data/curated/clips/c1.mp4") == clip
     assert config.localize(str(clip)) == clip                       # existing paths untouched
     assert str(config.localize("/workspace/nowhere/x.mp4")) == "/workspace/nowhere/x.mp4"
+
+
+def test_flow_counts_real_cosmos_results_and_follows_one_weld(tmp_path, monkeypatch):
+    import json
+    import shutil
+    from pathlib import Path
+    from copilot import config
+    from copilot.data import DataLayer
+    from copilot.flow import build_flow
+
+    src = Path(__file__).resolve().parents[1] / "data"
+    if not (src / "generated" / "SP-1043_J07_P3_FCAW").exists():
+        import pytest
+        pytest.skip("needs generated demo data")
+    shutil.copytree(src / "generated", tmp_path / "generated")
+    (tmp_path / "curated").mkdir()
+    if (src / "curated" / "manifest.jsonl").exists():
+        shutil.copy(src / "curated" / "manifest.jsonl", tmp_path / "curated" / "manifest.jsonl")
+    cache = tmp_path / "cache" / "worldmodels" / "assess_clip"
+    cache.mkdir(parents=True)
+    (cache / "a.json").write_text(json.dumps({"verdict": "reject", "source": "cosmos3-local",
+                                             "context": {"clip_id": "SP-1043_J07_P3_FCAW_t0209"}}))
+    (cache / "b.json").write_text(json.dumps({"verdict": "accept", "source": "heuristic-fallback"}))
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MOSAICO_OFFLINE", "1")
+
+    class Agent:
+        label, name = "Scripted (no LLM)", "scripted"
+
+    f = build_flow(DataLayer(), Agent(), {"mode_label": "REPLAY"}, {"status": "offline", "short": "offline"})
+    assert f["collect"]["passes"] == 24 and f["cosmos"]["assess"] == {"real": 1, "fallback": 1}
+    ex = f["example"]
+    assert ex["sequence"] == "SP-1043_J07_P3_FCAW" and ex["defect"] == "porosity" and ex["rt_result"] == "reject"
+    assert ex["verdict"] == "reject" and ex["verdict_real"] is True
+    assert ex["violation"]["param"] == "gas_lpm"

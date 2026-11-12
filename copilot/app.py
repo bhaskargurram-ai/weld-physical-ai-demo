@@ -89,6 +89,12 @@ def create_app() -> FastAPI:
             raise HTTPException(403, "file type not served")
         return FileResponse(p)
 
+    # -------------------------------------------------------------- "How it works" tab
+    @app.get("/api/flow")
+    def flow():
+        from .flow import build_flow
+        return build_flow(data, app.state.agent, cosmos_health(), mosaico_health())
+
     # -------------------------------------------------------------- health / pipeline strip
     @app.get("/api/health")
     def health():
