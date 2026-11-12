@@ -100,6 +100,8 @@ def cosmos_health() -> dict:
                 pass
         n_cache = sum(1 for _ in cache_dir.glob("**/*.json")) if cache_dir.exists() else 0
         out["replay_cache_files"] = n_cache
+        real = _real_cache_counts(cache_dir)
+        out["real_cached"] = real
         for svc in ("reasoner", "generator"):
             m = modes[svc]
             if m == "local":
@@ -107,9 +109,33 @@ def cosmos_health() -> dict:
             elif m == "nim":
                 out[svc] = bool(os.environ.get("NVIDIA_API_KEY") or os.environ.get("NGC_API_KEY"))
             else:
-                out[svc] = n_cache > 0     # replay works only with a populated cache (else heuristic/placeholder)
+                # replay: "ready" only if the cache holds results a real Cosmos 3 call produced (warm-up reports,
+                # placeholder metadata and rule-based fallbacks do not count)
+                out[svc] = real[svc] > 0
+            out[f"{svc}_live"] = m in ("local", "nim") and out[svc]
         return out
     return _cached("cosmos", 8, probe)
+
+
+_REAL_PREFIXES = ("cosmos3", "nim", "cache")
+
+
+def _real_cache_counts(cache_dir: Path) -> dict:
+    """Cached results that came from a real Cosmos 3 call, per service."""
+    fns = {"reasoner": ("assess_clip", "chat", "explain_signals"), "generator": ("what_if", "sim2real")}
+    out = {"reasoner": 0, "generator": 0}
+    if not cache_dir.exists():
+        return out
+    for svc, dirs in fns.items():
+        for d in dirs:
+            for f in (cache_dir / d).glob("*.json") if (cache_dir / d).is_dir() else ():
+                try:
+                    src = str(json.loads(f.read_text(encoding="utf-8")).get("source") or "").lower()
+                except (OSError, ValueError):
+                    continue
+                if src.startswith(_REAL_PREFIXES) and not any(w in src for w in ("fallback", "placeholder", "mock")):
+                    out[svc] += 1
+    return out
 
 
 def _http_ok(url: str) -> bool:

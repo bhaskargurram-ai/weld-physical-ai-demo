@@ -1199,7 +1199,7 @@ async function loadFlow() {
              "Write a Cosmos 3 prompt per clip for what-if / sim→real"],
       big: cu.kept, unit: `of ${cu.total} clips kept`,
       foot: (Object.entries(cu.reasons).map(([k, v]) => `${v} ${String(k).replace(/_/g, " ")}`).join(" · ") || "nothing rejected")
-        + (cu.total && !curReal ? " · Cosmos Curator failed, same stages run on CPU" : ""),
+        + (cu.total && !curReal ? " · same stages run on CPU here (Cosmos Curator itself runs on the GPU pod)" : ""),
       status: !cu.total ? "empty" : curReal ? "ok" : "cpu",
       statusText: !cu.total ? null : curReal ? "Cosmos Curator" : "CPU fallback" },
     { id: "cosmos", tab: "generate", n: 4, title: "World models", tech: "NVIDIA Cosmos 3",

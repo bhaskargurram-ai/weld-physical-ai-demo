@@ -313,3 +313,15 @@ def test_mosaico_rows_without_a_local_pass_dir_are_not_listed(tmp_path, monkeypa
     monkeypatch.setattr(data_mod, "_mosaico", lambda: FakeMosaico)
     rows = data_mod.DataLayer().all_passes()
     assert [r["sequence_name"] for r in rows] == real
+
+
+def test_replay_cache_counts_only_real_cosmos_results(tmp_path):
+    import json
+    from copilot.models import _real_cache_counts
+    a = tmp_path / "assess_clip"; a.mkdir()
+    (a / "1.json").write_text(json.dumps({"source": "cosmos3-local", "verdict": "reject"}))
+    (a / "2.json").write_text(json.dumps({"source": "heuristic-fallback"}))
+    g = tmp_path / "what_if"; g.mkdir()
+    (g / "x.meta.json").write_text(json.dumps({"source": "heuristic-fallback (placeholder)"}))
+    (tmp_path / "warm_report.json").write_text("{}")
+    assert _real_cache_counts(tmp_path) == {"reasoner": 1, "generator": 0}
