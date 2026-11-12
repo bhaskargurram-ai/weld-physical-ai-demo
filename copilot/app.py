@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
 import os
 import time
 from pathlib import Path
@@ -19,6 +20,12 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 from . import config
+
+# Windows takes MIME types from the registry, where .js is sometimes text/plain: browsers then refuse
+# the UI scripts and the page stays empty. Pin the types the UI needs.
+for _ext, _type in ((".js", "text/javascript"), (".mjs", "text/javascript"), (".css", "text/css"),
+                    (".svg", "image/svg+xml"), (".mp4", "video/mp4"), (".json", "application/json")):
+    mimetypes.add_type(_type, _ext)
 from .agent import Session, make_agent
 from .data import SIGNAL_INFO, SIGNALS, DataLayer, mosaico_health
 from .jobs import JobManager

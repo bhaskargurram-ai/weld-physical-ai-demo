@@ -36,6 +36,23 @@ def load_dotenv(path: Path) -> None:
             os.environ[k] = v
 
 
+def data_report(data: Path) -> int:
+    """Print what the copilot will show; returns the number of weld passes found."""
+    gen, cur, cache = data / "generated", data / "curated", data / "cache" / "worldmodels"
+    passes = [d for d in gen.iterdir() if (d / "meta.json").exists()] if gen.is_dir() else []
+    videos = sum((d / "torch_cam.mp4").exists() for d in passes)
+    manifest = cur / "manifest.jsonl"
+    clips = sum(1 for _ in manifest.open(encoding="utf-8")) if manifest.exists() else 0
+    cached = len(list(cache.rglob("*.json"))) if cache.is_dir() else 0
+    print(f"data: {data}")
+    print(f"  weld passes   {len(passes):>4}  ({videos} with torch-cam video)   {gen}")
+    print(f"  curated clips {clips:>4}   {manifest if manifest.exists() else '(no manifest.jsonl)'}")
+    print(f"  Cosmos cache  {cached:>4} entries   {cache if cache.is_dir() else '(none: verdicts fall back to rules)'}")
+    if passes and not videos:
+        print("  note: no videos downloaded -> the replay shows signal plots only")
+    return len(passes)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--port", type=int, default=int(os.environ.get("COPILOT_PORT", 7860)))
@@ -61,10 +78,13 @@ def main() -> int:
         print("Missing packages. Run:  python -m pip install -r requirements.txt")
         return 1
 
-    if not (ROOT / "data" / "generated").exists() and not args.fixtures:
-        print("No data/generated yet. Either download the GPU run (python runpod/download.py demo)\n"
-              "or start with mock data:  python scripts/run_copilot.py --fixtures")
-        return 1
+    if not args.fixtures:
+        found = data_report(Path(os.environ.get("DATA_DIR") or ROOT / "data"))
+        if not found:
+            print("\nNo weld passes found, so the copilot would be empty. Either:\n"
+                  "  python runpod/download.py demo          # download the GPU run's data into ./data\n"
+                  "  python scripts/run_copilot.py --fixtures  # or start with built-in mock data")
+            return 1
 
     url = f"http://localhost:{args.port}"
     mode = "fixtures" if args.fixtures else ("live" if args.live else "replay (no GPU)")

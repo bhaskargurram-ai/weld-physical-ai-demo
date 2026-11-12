@@ -400,7 +400,7 @@ class DataLayer:
 
     def clip_video(self, row: dict) -> str | None:
         uri = row.get("clip_uri") or ""
-        for cand in (Path(uri), config.curated_dir() / uri, config.curated_dir() / "clips" / f"{row.get('clip_id')}.mp4"):
+        for cand in (config.localize(uri), config.curated_dir() / uri, config.curated_dir() / "clips" / f"{row.get('clip_id')}.mp4"):
             try:
                 if uri and cand.exists():
                     return file_url(cand)

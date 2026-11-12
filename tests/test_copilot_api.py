@@ -160,3 +160,14 @@ def test_index_served(client):
     r = client.get("/")
     assert r.status_code == 200 and "Weld Copilot" in r.text
     assert client.get("/static/app.js").status_code == 200
+
+
+def test_localize_maps_runpod_paths_onto_local_data(tmp_path, monkeypatch):
+    from copilot import config
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    clip = tmp_path / "curated" / "clips" / "c1.mp4"
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b"x")
+    assert config.localize("/workspace/weld-physical-ai-demo/data/curated/clips/c1.mp4") == clip
+    assert config.localize(str(clip)) == clip                       # existing paths untouched
+    assert str(config.localize("/workspace/nowhere/x.mp4")) == "/workspace/nowhere/x.mp4"

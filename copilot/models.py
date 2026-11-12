@@ -425,7 +425,7 @@ class WorldModels:
             call = (lambda: meta_fn(prompt, **kw)) if callable(meta_fn) else (lambda: getattr(mod, fn)(prompt, **kw))
         res = self._run_with_progress(call, progress, what)
         info = res if isinstance(res, dict) else {}
-        path = Path(str(info.get("path") if info else res))
+        path = config.localize(str(info.get("path") if info else res))
         if not path.exists():
             raise FileNotFoundError(f"{what} returned no video ({path})")
         if not info.get("source"):

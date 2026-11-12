@@ -21,6 +21,24 @@ def data_dir() -> Path:
     return (REPO_ROOT / "data").resolve()
 
 
+def localize(p: str | Path) -> Path:
+    """Map a path written on another machine (e.g. /workspace/weld-physical-ai-demo/data/curated/x.mp4 on the
+    Runpod pod, downloaded with runpod/download.py) onto this machine's data dir. Unchanged if it exists."""
+    path = Path(str(p))
+    try:
+        if path.exists():
+            return path
+    except OSError:
+        pass
+    parts = str(p).replace("\\", "/").split("/")
+    if "data" in parts:
+        i = len(parts) - 1 - parts[::-1].index("data")       # last ".../data/" segment
+        cand = data_dir().joinpath(*[x for x in parts[i + 1:] if x])
+        if cand.exists():
+            return cand
+    return path
+
+
 def generated_dir() -> Path:
     return data_dir() / "generated"
 
