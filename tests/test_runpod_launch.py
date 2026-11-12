@@ -292,3 +292,25 @@ def test_availability_table_lists_datacenters_with_stock(env_file, monkeypatch, 
     assert launch.main(["availability", "--env-file", str(env_file)]) == 0
     out = capsys.readouterr().out
     assert out.index("EU-RO-1") < out.index("US-TX-3 *") and "NO-VOL" not in out and "HIGH" in out
+
+
+def test_new_volume_prefers_a_datacenter_with_the_s3_api():
+    dcs = [{"id": "AP-IN-1", "networkVolumeTypes": ["STANDARD"],
+            "gpuAvailability": [{"id": "G1", "availability": "HIGH"}]},
+           {"id": "US-NE-1", "networkVolumeTypes": ["STANDARD"],
+            "gpuAvailability": [{"id": "G1", "availability": "LOW"}]}]
+    assert launch.pick_datacenter(dcs, ["G1"]) == "US-NE-1"           # downloadable beats more stock
+    assert launch.pick_datacenter(dcs[:1], ["G1"]) == "AP-IN-1"       # still works when it is the only option
+
+
+def test_ctrl_c_only_detaches_and_never_terminates_the_pod(env_file, monkeypatch):
+    api = FakeApi(unavailable=())
+    monkeypatch.setattr(launch.urllib.request, "urlopen", api)
+
+    def interrupted(self):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(launch.Follower, "run", interrupted)
+    assert launch.main(["run", "--env-file", str(env_file)]) == 130
+    assert not any(m == "DELETE" for m, _, _ in api.calls)              # pod left running; it self-terminates
+    assert json.loads(launch.STATE_FILE.read_text())["pod_id"] == "pod_1"   # so `logs` / `down` still find it

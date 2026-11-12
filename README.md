@@ -126,7 +126,8 @@ python3 runpod/launch.py      # or: make cloud-run   (make cloud-serve keeps the
 3. the pod clones this repo and runs `runpod/pod_entry.sh`: bootstrap → Mosaico → fetch real data (all BAM workpieces)/ingest/export →
    Cosmos Curator → Cosmos 3 servers → warm cache → results in `/workspace/results/` (on the volume)
 4. streams the pod logs to your terminal and **terminates the pod when the code ends** — on success, on failure,
-   on Ctrl-C, or after `MAX_HOURS`. The pod also terminates itself, so nothing keeps billing if your laptop sleeps.
+   or after `MAX_HOURS`. The pod terminates itself, so nothing keeps billing if your laptop sleeps. Ctrl-C only stops
+   *watching* (re-attach with `launch.py logs`); `launch.py down` stops the pod.
 
 The volume is kept (models + venvs + results, about $10.50/month) so the next run starts in minutes;
 `python3 runpod/launch.py down --delete-volume` (or `DELETE_VOLUME_AT_END=1`) removes it.

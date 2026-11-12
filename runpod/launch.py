@@ -70,6 +70,10 @@ DEFAULTS = {
     "AUTO_RELOCATE_VOLUME": "1",
     "POD_NAME": "weldworld",
 }
+# Data centers with Runpod's S3-compatible API for network volumes (docs.runpod.io/storage/s3-api, 2026-11):
+# runpod/download.py can only fetch results from a volume in one of these, so new volumes prefer them.
+S3_DATACENTERS = {"EU-CZ-1", "EU-RO-1", "EUR-IS-1", "EUR-NO-1", "US-CA-2", "US-GA-2", "US-IL-1", "US-KS-2",
+                  "US-MD-1", "US-MO-1", "US-MO-2", "US-NC-1", "US-NC-2", "US-NE-1", "US-WA-1"}
 AVAIL_SCORE = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "NONE": 0}
 
 # Pod start command: start Runpod's own services (SSH/Jupyter) if the image has them, fetch the repo
@@ -245,11 +249,12 @@ def pod_attempts(cfg: dict) -> list[tuple[str, int, str]]:
     return [(g, n, c) for c in cudas for n in counts for g in gpu_types(cfg)]
 
 
-def pick_datacenter(dcs: list[dict], gpus: list[str], forced: str = "") -> str:
-    """Best data center for the first GPU type that has stock and that supports network volumes."""
+def pick_datacenter(dcs: list[dict], gpus: list[str], forced: str = "", prefer=S3_DATACENTERS) -> str:
+    """Best data center for the first GPU type that has stock and that supports network volumes; data centers in
+    ``prefer`` (S3 API for runpod/download.py) win over any without it."""
     if forced:
         return forced
-    best, best_key = None, (-1, -1)
+    best, best_key = None, (-1, -1, -1)
     for dc in dcs:
         if not dc.get("networkVolumeTypes"):
             continue
@@ -258,7 +263,7 @@ def pick_datacenter(dcs: list[dict], gpus: list[str], forced: str = "") -> str:
         for rank, gpu in enumerate(gpus):
             score = avail.get(gpu, 0)
             if score:
-                key = (len(gpus) - rank, score)  # prefer earlier GPU types, then more stock
+                key = (dc["id"] in prefer, len(gpus) - rank, score)  # S3 API, earlier GPU types, more stock
                 if key > best_key:
                     best, best_key = dc["id"], key
                 break
@@ -329,6 +334,9 @@ def ensure_volume(rp: Runpod, cfg: dict) -> dict:
     for v in rp.list_volumes():
         if v.get("name") == name:
             log(f"reusing network volume '{name}' ({v['id']}, {v.get('size')} GB, {v.get('dataCenter')})")
+            if v.get("dataCenter") not in S3_DATACENTERS:
+                log(f"  note: {v.get('dataCenter')} has no Runpod S3 API, so runpod/download.py cannot fetch results "
+                    "from this volume. To move it: python runpod/launch.py down --delete-volume, then run again.")
             v["_known"] = load_state().get("volume_id") == v["id"]  # tracked by this checkout's state file
             return v
     dc = pick_datacenter(rp.datacenters(), gpu_types(cfg), cfg.get("DATA_CENTER", ""))
@@ -379,7 +387,7 @@ def ranked_datacenters(rp: Runpod, gpus: list[str], exclude: str = "") -> list[s
         avail = {g.get("id"): AVAIL_SCORE.get(g.get("availability", "NONE"), 0) for g in dc.get("gpuAvailability") or []}
         score = max(((len(gpus) - i) * 10 + avail.get(g, 0) for i, g in enumerate(gpus) if avail.get(g)), default=0)
         if score:
-            ranked.append((score, dc["id"]))
+            ranked.append((score + (1000 if dc["id"] in S3_DATACENTERS else 0), dc["id"]))
     return [d for _, d in sorted(ranked, reverse=True)]
 
 
@@ -605,16 +613,15 @@ def follow_and_teardown(rp: Runpod, cfg: dict, pod_id: str, detach: bool) -> int
         return 0
     deadline = time.time() + float(cfg["MAX_HOURS"]) * 3600 + 900
     f = Follower(rp, pod_id, deadline)
-    interrupted = False
     try:
         f.run()
     except KeyboardInterrupt:
-        interrupted = True
-        log("Ctrl-C: stopping everything")
-    finally:
-        teardown(rp, cfg, pod_id, cfg.get("DELETE_VOLUME_AT_END") == "1")
-    if interrupted:
+        # Ctrl-C only stops *watching*: the pod keeps running and terminates itself when the run ends
+        # (or after MAX_HOURS). Stopping it is an explicit `down`.
+        log("Ctrl-C: stopped following the logs; the pod keeps running and terminates itself when the run ends.")
+        log("  re-attach: python runpod/launch.py logs     stop it now: python runpod/launch.py down")
         return 130
+    teardown(rp, cfg, pod_id, cfg.get("DELETE_VOLUME_AT_END") == "1")
     log(f"finished: {f.reason}" + (f" (rc={f.rc})" if f.rc is not None else ""))
     return f.rc if f.rc is not None else 1
 
@@ -650,7 +657,8 @@ def cmd_run(rp: Runpod, cfg: dict, args) -> int:
                volume_id=vol["id"], data_center=vol["dataCenter"], used_volumes=used)
     log(f"console: https://www.runpod.io/console/pods  ·  copilot (serve mode): "
         f"https://{pod['id']}-{COPILOT_PORT}.proxy.runpod.net")
-    log(f"mode={cfg['RUN_MODE']}  max={cfg['MAX_HOURS']}h  — Ctrl-C terminates the pod")
+    log(f"mode={cfg['RUN_MODE']}  max={cfg['MAX_HOURS']}h  — Ctrl-C only stops watching; "
+        "`python runpod/launch.py down` stops the pod")
     return follow_and_teardown(rp, cfg, pod["id"], args.detach)
 
 
@@ -711,7 +719,7 @@ def main(argv: list[str] | None = None) -> int:
     if not cfg.get("RUNPOD_API_KEY") and not args.dry_run:
         raise SystemExit("RUNPOD_API_KEY is empty (.env)")
     rp = Runpod(cfg.get("RUNPOD_API_KEY", ""))
-    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))   # = detach, see above
     return {"run": cmd_run, "status": cmd_status, "logs": cmd_logs, "down": cmd_down,
             "availability": cmd_availability}[args.command](rp, cfg, args)
 

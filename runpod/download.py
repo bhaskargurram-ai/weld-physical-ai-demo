@@ -51,9 +51,14 @@ PRESETS: dict[str, list[tuple[str, str]]] = {
         (f"{REMOTE_REPO}/data/", "data/"),                                # everything except raw/ downloads
     ],
 }
-# The S3 API exists only in these data centers (docs, 2026-11).
-S3_DATACENTERS = {"EU-CZ-1", "EU-RO-1", "EUR-IS-1", "EUR-NO-1", "US-CA-2", "US-GA-2", "US-IL-1", "US-KS-2",
-                  "US-MD-1", "US-MO-1", "US-MO-2", "US-NC-1", "US-NC-2", "US-NE-1", "US-WA-1"}
+def _s3_dcs() -> set:
+    spec = importlib.util.spec_from_file_location("launch", REPO_ROOT / "runpod" / "launch.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.S3_DATACENTERS
+
+
+S3_DATACENTERS = _s3_dcs()      # single source: runpod/launch.py
 SKIP_PARTS = {".venv", "__pycache__", ".git", "raw"}   # raw/ = multi-GB source downloads, re-fetchable
 
 
