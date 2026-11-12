@@ -932,16 +932,17 @@ def convert_layer(raw_dir: Path, out_dir: Path, wid: int, layer: int, exp: Optio
     gas_cmd2 = _ps_const(pst, "GASVALUE") if tandem else None
     anomalies = find_anomalies(arc, arc_on_s, gas_cmd, electrodes, trail_window, gas_cmd2)
 
-    # thermo_2 reading for the record: plunged pool thermocouple (t8/5) - see signal_notes
+    # thermo_2 reading for the record: plunged pool thermocouple (t8/5) - see signal_notes. Rough estimate only:
+    # 0.5 s rolling median, longest stretch above 500 °C that peaks > 1000 °C, t8/5 = its end - last time >= 800 °C
     t85_meas = None
-    if th2.size:
-        k = int(np.nanargmax(th2))
-        if th2[k] > 800:
-            after_t, after_v = tt2[k:], th2[k:]
-            b8 = np.flatnonzero(after_v < 800)
-            b5 = np.flatnonzero(after_v < 500)
-            if b8.size and b5.size:
-                t85_meas = _r(after_t[b5[0]] - after_t[b8[0]], 2)
+    if th2.size > 1000:
+        sm = pd.Series(th2).rolling(501, center=True, min_periods=251).median().to_numpy()
+        runs = _runs(np.nan_to_num(sm, nan=-1e9) > 500)
+        if runs:
+            a_, b_ = max(runs, key=lambda r: r[1] - r[0])
+            seg = sm[a_:b_]
+            if np.nanmax(seg) > 1000:
+                t85_meas = _r(tt2[b_ - 1] - tt2[a_ + int(np.flatnonzero(seg >= 800)[-1])], 2)
 
     # --- meta
     rel_files = [p.relative_to(raw_dir).as_posix() for p in (f_proc, f_rob, f_psl, f_pst, f_vid) if p is not None]
@@ -975,7 +976,7 @@ def convert_layer(raw_dir: Path, out_dir: Path, wid: int, layer: int, exp: Optio
         "weave_amp_mm": row.get("weave_amp"), "weave_hz": row.get("weave_freq"),
         "interpass_start_c": _r(np.nanmean(thermal["interpass_c"].to_numpy()[:50]), 1),
         "interpass_max_c": _r(np.nanmax(thermal["interpass_c"].to_numpy()), 1),
-        "t85_measured_thermo2_s": t85_meas,
+        "t85_measured_thermo2_s": t85_meas,   # rough; matches experiment_list t85 within ~0.6 s on ~half the layers
         "anomalies": anomalies,
         "robot_arc_on_s": robot_arc_on, "trail_arc_window_s": [_r(x) for x in trail_window] if trail_window else None,
         "consumables": {"shielding_gas": "not stated in the record", "wire": "not stated in the record"},
@@ -993,9 +994,11 @@ def convert_layer(raw_dir: Path, out_dir: Path, wid: int, layer: int, exp: Optio
             "position_mm": "TCP distance along the seam from the arc-start position",
             "heat_input": f"η {ARC_EFFICIENCY} (EN 1011-1, GMAW) × (P_lead + P_trail) / v / 1000 [kJ/mm], P = 10 ms "
                           f"means of instantaneous U·I; v floored at 0.5 × wts; NaN while the lead arc is off",
-            "interpass_c": "robot.nc thermo_1 (workpiece thermocouple; smooth 100-290 °C history) - used as the "
-                           "interpass / workpiece temperature. Channel meaning is our reading of the data: the "
-                           "record's notebook does not document thermo_1/2",
+            "interpass_c": "robot.nc thermo_1: a workpiece thermocouple at a fixed spot near the seam (smooth "
+                           "history that peaks when the torch passes it - up to ~890 °C on the WID617 cap). Only "
+                           "its value at arc start (interpass_start_c) is a true interpass temperature; later "
+                           "values are local workpiece temperature. Channel meaning is our reading of the data: "
+                           "the record's notebook does not document thermo_1/2",
             "thermo2_c": "robot.nc thermo_2 raw: reads noise (≈ -280..+40 °C) until it is plunged into the weld "
                          "pool, then peaks near 1400 °C and cools - consistent with the t8/5 thermocouple "
                          "(experiment_list t85); treat values before the peak as invalid",
@@ -1167,7 +1170,8 @@ def write_report(metas: list[dict], path: Path) -> Path:
         L.append(f"- travel {me['travel_speed_mmps']} mm/s vs wts {no['wts_mmps']} ({m.get('travel_speed_mismatch_pct')} %), "
                  f"seam {me.get('seam_length_mm')} mm; heat input {me['heat_input_kj_mm']} kJ/mm (nominal "
                  f"{no['heat_input_kj_mm']})")
-        L.append(f"- thermo_1 (interpass) {m.get('interpass_start_c')} → {m.get('interpass_max_c')} °C; t8/5 from "
+        L.append(f"- thermo_1: {m.get('interpass_start_c')} °C at arc start (interpass), max {m.get('interpass_max_c')} °C "
+                 f"when the torch passes the thermocouple; t8/5 from "
                  f"thermo_2 {m.get('t85_measured_thermo2_s')} s vs experiment_list {no.get('t85_s')} s")
         v = m.get("video")
         if v:

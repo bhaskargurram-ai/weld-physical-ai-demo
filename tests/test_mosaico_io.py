@@ -150,3 +150,23 @@ def test_mosaico_roundtrip(tmp_path, monkeypatch):
         assert common.is_offline()
     finally:
         client.sequence_delete(seq)
+
+
+def test_real_data_wps_check_ignores_ramps_blips_and_unchecked_channels():
+    import numpy as np
+    import pandas as pd
+    from mosaico_io.query import violations_from_signals
+    t = np.arange(0, 60, 0.01)
+    cur = np.full_like(t, 500.0)
+    cur[t < 1.5] = 300.0                        # start ramp
+    cur[(t > 20) & (t < 20.4)] = 420.0          # 0.4 s blip (normal SAW wander)
+    cur[(t > 30) & (t < 33)] = 420.0            # 3 s sustained excursion -> the only one reported
+    cur[t > 58.5] = 300.0                       # stop ramp
+    df = pd.DataFrame({"t_s": t, "current_a": cur, "voltage_v": 27.0, "wfs_mpm": 1.2,
+                       "travel_speed_mmps": 12.0, "heat_input_kj_mm": 1.1, "gas_lpm": np.nan})
+    meta = {"source": {"id": "aimen_saw", "synthetic": False}, "arc_on_s": 60.0,
+            "wps": {"current_a": [450, 550], "voltage_v": [24.3, 29.7], "wfs_mpm": [1.62, 1.98],
+                    "unchecked": ["wfs_mpm"]}}
+    v = violations_from_signals(df, meta)
+    assert [(x["param"], x["kind"]) for x in v] == [("current_a", "low")]
+    assert 29.5 < v[0]["t_start_s"] < 31 and v[0]["t_end_s"] > 32

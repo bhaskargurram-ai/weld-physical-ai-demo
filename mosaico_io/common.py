@@ -34,12 +34,26 @@ SIGNALS = ("current_a", "voltage_v", "wfs_mpm", "gas_lpm", "travel_speed_mmps", 
 OPTIONAL_CORE = ("positioner_deg",)
 # optional extras, returned after the core columns when present: tandem trail electrode, torch position,
 # raw temperature channels
-EXTRA_SIGNALS = ("current2_a", "voltage2_v", "wfs2_mpm", "position_mm", "temp_left_c", "temp_right_c",
+EXTRA_SIGNALS = ("current2_a", "voltage2_v", "wfs2_mpm", "current_rms_a", "current2_rms_a", "voltage2_rms_v",
+                 "position_mm", "temp_left_c", "temp_right_c",
                  "temp_back_c", "thermo2_c")
-ARC_COLS = ("current_a", "voltage_v", "wfs_mpm", "gas_lpm", "current2_a", "voltage2_v", "wfs2_mpm")
+ARC_COLS = ("current_a", "voltage_v", "wfs_mpm", "gas_lpm", "current2_a", "voltage2_v", "wfs2_mpm",
+            "current_rms_a", "current2_rms_a", "voltage2_rms_v")
+RMS_OF = {"current_a": "current_rms_a", "current2_a": "current2_rms_a", "voltage2_v": "voltage2_rms_v"}
 TRAVEL_COLS = ("travel_speed_mmps", "positioner_deg", "position_mm", "heat_input_kj_mm")
 THERMAL_COLS = ("interpass_c", "temp_left_c", "temp_right_c", "temp_back_c", "thermo2_c")
-AVG_COLS = ("current_a", "voltage_v", "wfs_mpm", "gas_lpm", "current2_a", "voltage2_v", "wfs2_mpm")
+AVG_COLS = ("current_a", "voltage_v", "wfs_mpm", "gas_lpm", "current2_a", "voltage2_v", "wfs2_mpm",
+            "current_rms_a", "current2_rms_a", "voltage2_rms_v")
+
+
+def is_bipolar(x) -> bool:
+    """AC signal (e.g. AIMEN's AC trail electrode): a 10 ms mean of it is ~0 and says nothing about the
+    process, so WPS checks use its RMS column or skip it."""
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if len(x) < 10:
+        return False
+    return float(np.mean(x < 0)) > 0.15 and abs(float(np.mean(x))) < 0.3 * float(np.percentile(np.abs(x), 90))
 
 TOPIC_BEAD_PHOTO = "/camera/bead/photo"   # post-weld bead photos (AIMEN), CompressedImage JPEG
 

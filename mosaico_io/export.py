@@ -304,7 +304,7 @@ def export_clips(out_dir, sequences: Optional[list[str]] = None, clip_s: float =
                 vinfo["fps"] = _probe_fps(vfile)
             photos = _export_photos(seq, meta, local, out)
             media = "video" if has_video else ("image" if photos else "none")
-            wins = choose_windows(meta, clip_s, media=media)
+            wins = choose_windows(meta, clip_s, media="video" if media == "video" else "image")
             src_info = source_info(meta)
             inds = ndt_indications(meta)
             ndt = meta.get("ndt") if isinstance(meta.get("ndt"), dict) else {}
@@ -407,8 +407,9 @@ def main(argv=None):
                        data_source=a.data_source)
     n_def = sum(r["label"] == "defect" for r in res)
     n_img = sum(r["media_type"] == "image" for r in res)
-    print(f"done: {len(res)} windows ({n_def} defect, {len(res) - n_def} clean; {len(res) - n_img} video clips, "
-          f"{n_img} photo-only) -> {a.out} "
+    n_vid = sum(r["media_type"] == "video" for r in res)
+    print(f"done: {len(res)} windows ({n_def} defect, {len(res) - n_def} clean; {n_vid} video clips, "
+          f"{n_img} photo-only, {len(res) - n_vid - n_img} signals-only) -> {a.out} "
           f"[{'offline' if is_offline() else 'mosaicod'}] in {time.time() - t:.1f}s")
     return 0
 

@@ -83,6 +83,13 @@ def _defect_list(c: dict) -> list[dict]:
     return out
 
 
+def _bipolar(st: dict) -> bool:
+    mn, mx, me = st.get("min"), st.get("max"), st.get("mean")
+    if not all(isinstance(x, (int, float)) for x in (mn, mx, me)):
+        return False
+    return mn < 0 < mx and abs(me) < 0.3 * max(abs(mn), abs(mx))
+
+
 def _violation_direction(v: dict) -> str:
     val, lo, hi = v.get("value"), v.get("limit_lo"), v.get("limit_hi")
     if isinstance(val, (int, float)):
@@ -126,9 +133,15 @@ def assess(context: Optional[dict]) -> dict:
     stats = c.get("signal_stats") if isinstance(c.get("signal_stats"), dict) else {}
     wps = c.get("wps") or {}
     flagged = {f["param"] for f in findings}
+    rms_of = {"current_a": "current_rms_a", "current2_a": "current2_rms_a", "voltage2_v": "voltage2_rms_v"}
     for p, st in stats.items():
         if p in flagged or not isinstance(st, dict) or p not in wps:
             continue
+        if _bipolar(st):                    # AC electrode: compare its RMS, never the ~0 mean
+            rms = stats.get(rms_of.get(p, ""))
+            if not isinstance(rms, dict):
+                continue
+            st = rms
         rng = wps[p]
         if isinstance(rng, (list, tuple)) and len(rng) == 2 and isinstance(st.get("mean"), (int, float)):
             lo, hi = rng

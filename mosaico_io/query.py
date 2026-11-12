@@ -19,8 +19,8 @@ import numpy as np
 import pandas as pd
 
 from collect.schema import ARC_HZ, TOPIC_ARC, TOPIC_THERMAL, TOPIC_TRAVEL
-from mosaico_io.common import (ARC_COLS, SIGNALS, THERMAL_COLS, TRAVEL_COLS, assemble_signals, avg_signals, connect,
-                               flat_keys,
+from mosaico_io.common import (ARC_COLS, RMS_OF, SIGNALS, THERMAL_COLS, TRAVEL_COLS, assemble_signals, avg_signals, connect,
+                               flat_keys, is_bipolar,
                                is_offline, json_default, load_meta, local_sequences, meta_row, offline_signals)
 
 _OPS = ("eq", "neq", "gt", "geq", "lt", "leq", "match", "in_", "between")
@@ -189,9 +189,34 @@ def _runs(mask: np.ndarray, t: np.ndarray, min_duration_s: float, gap_s: float =
     return [(a, b) for a, b in out if t[b] - t[a] + 1.0 / ARC_HZ >= min_duration_s]
 
 
+REAL_START_SKIP_S = 2.0      # real arcs: current / travel ramp up over ~2 s (AIMEN, BAM)
+REAL_END_SKIP_S = 2.5        # real arcs: robot decelerates / crater fill over the last ~2.5 s (116 of 120 AIMEN
+                             # passes otherwise flag travel speed + heat input only there)
+REAL_MIN_DURATION_S = 1.0    # real SAW current wanders +-10 % for ~0.4 s at a time; count sustained excursions only
+REAL_MERGE_GAP_S = 1.0       # real signals hover at a range edge: merge excursions < 1 s apart into one
+
+
+def _merge_runs(runs: list[tuple[int, int]], t: np.ndarray, gap_s: float) -> list[tuple[int, int]]:
+    """Merge already duration-filtered runs separated by less than gap_s (one excursion, not ten)."""
+    out: list[tuple[int, int]] = []
+    for a, b in runs:
+        if out and gap_s and t[a] - t[out[-1][1]] < gap_s:
+            out[-1] = (out[-1][0], b)
+        else:
+            out.append((a, b))
+    return out
+
+
+def _is_real(meta: dict) -> bool:
+    src = meta.get("source")
+    return isinstance(src, dict) and not src.get("synthetic", False)
+
+
 def _arc_window(meta: dict, df: pd.DataFrame) -> tuple[float, float]:
-    arc_on_s = float(meta.get("arc_on_s", df["t_s"].iloc[-1]))
-    return 0.5, arc_on_s - 1.0      # skip hot-start ramp and programmed crater fill
+    arc_on_s = float(meta.get("arc_on_s") or df["t_s"].iloc[-1])
+    if _is_real(meta):
+        return REAL_START_SKIP_S, arc_on_s - REAL_END_SKIP_S
+    return 0.5, arc_on_s - 1.0        # skip hot-start ramp and programmed crater fill
 
 
 def _has_range(wps: dict, p: str) -> bool:
@@ -211,22 +236,38 @@ def violations_from_signals(df: pd.DataFrame, meta: dict, min_duration_s: float 
     a0, a1 = _arc_window(meta, df)
     cur = avg["current_a"].to_numpy(dtype=float)
     on = (t >= a0) & (t <= a1) & (np.nan_to_num(cur, nan=0.0) > 10)
+    gap = REAL_MERGE_GAP_S if _is_real(meta) else 0.0
+    if _is_real(meta):
+        min_duration_s = max(min_duration_s, REAL_MIN_DURATION_S)
+    unchecked = set(wps.get("unchecked") or ())       # e.g. a channel that does not read the commanded value
     out = []
     for p in WPS_PARAMS:
-        if not _has_range(wps, p) or p not in avg or not avg[p].notna().any():
+        if p in unchecked or not _has_range(wps, p) or p not in avg or not avg[p].notna().any():
             continue
         lo, hi = (float(v) for v in wps[p])
         x = avg[p].to_numpy(dtype=float)
+        if is_bipolar(df[p].to_numpy(dtype=float)[on]) if on.any() else False:
+            rms = RMS_OF.get(p)          # AC electrode: compare its RMS, or skip when there is none
+            if not rms or rms not in avg or not avg[rms].notna().any():
+                continue
+            x = avg[rms].to_numpy(dtype=float)
+            basis = "rms"
+        else:
+            basis = "mean"
         for kind, mask in (("high", on & (x > hi)), ("low", on & (x < lo))):
-            for i0, i1 in _runs(mask, t, min_duration_s):
+            for i0, i1 in _merge_runs(_runs(mask, t, min_duration_s), t, gap):
                 seg = x[i0:i1 + 1]
-                out.append({"param": p, "t_start_s": round(float(t[i0]), 2), "t_end_s": round(float(t[i1]), 2),
-                            "value": round(float(seg.max() if kind == "high" else seg.min()), 3),
-                            "limit_lo": lo, "limit_hi": hi, "kind": kind})
+                seg = seg[np.isfinite(seg) & mask[i0:i1 + 1]] if gap else seg
+                v = {"param": p, "t_start_s": round(float(t[i0]), 2), "t_end_s": round(float(t[i1]), 2),
+                     "value": round(float(seg.max() if kind == "high" else seg.min()), 3),
+                     "limit_lo": lo, "limit_hi": hi, "kind": kind}
+                if basis == "rms":
+                    v["basis"] = "rms"      # AC electrode: value is the RMS of the 10 ms samples
+                out.append(v)
     if "interpass_c" in avg and avg["interpass_c"].notna().any() and isinstance(wps.get("max_interpass_c"), (int, float)):
         x = avg["interpass_c"].to_numpy()
         lim = float(wps["max_interpass_c"])
-        for i0, i1 in _runs(x > lim, t, min_duration_s):
+        for i0, i1 in _merge_runs(_runs(x > lim, t, min_duration_s), t, gap):
             out.append({"param": "interpass_c", "t_start_s": round(float(t[i0]), 2),
                         "t_end_s": round(float(t[i1]), 2), "value": round(float(x[i0:i1 + 1].max()), 1),
                         "limit_lo": None, "limit_hi": lim, "kind": "high"})

@@ -18,7 +18,19 @@ _PARAM_LABEL = {
     "heat_input_kj_mm": ("heat input", "kJ/mm", 2), "interpass_c": ("interpass temperature", "°C", 0),
     "current2_a": ("trail current", "A", 0), "voltage2_v": ("trail voltage", "V", 1),
     "wfs2_mpm": ("trail wire feed", "m/min", 1),
+    "current_rms_a": ("lead current (RMS)", "A", 0), "current2_rms_a": ("trail current (RMS)", "A", 0),
+    "voltage2_rms_v": ("trail voltage (RMS)", "V", 1),
 }
+_RMS_OF = {"current_a": "current_rms_a", "current2_a": "current2_rms_a", "voltage2_v": "voltage2_rms_v"}
+
+
+def _bipolar(d: dict) -> bool:
+    """AC signal from its window stats: crosses zero with a mean near 0 (10 ms means of AC are meaningless)."""
+    try:
+        mn, mx, me = float(d["min"]), float(d["max"]), float(d["mean"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return mn < 0 < mx and abs(me) < 0.3 * max(abs(mn), abs(mx))
 _LEAD = {"current_a": "lead current", "voltage_v": "lead voltage", "wfs_mpm": "lead wire feed"}
 
 _RT_TEXT = {
@@ -49,11 +61,19 @@ def _is_real(ctx: dict[str, Any]) -> bool:
 
 def _arc_sentence(stats: dict, tandem: bool, process: str) -> str | None:
     parts = []
+    ac = []
     for sig in ("current_a", "voltage_v", "wfs_mpm", "current2_a", "voltage2_v", "wfs2_mpm", "travel_speed_mmps",
                 "gas_lpm", "heat_input_kj_mm", "interpass_c"):
         d = stats.get(sig)
         if not d or d.get("mean") is None or d.get("mean") != d.get("mean"):
             continue
+        if _bipolar(d):                      # AC electrode: report its RMS when logged, never the ~0 mean
+            rms = stats.get(_RMS_OF.get(sig, ""))
+            if rms and rms.get("mean") == rms.get("mean"):
+                sig, d = _RMS_OF[sig], rms
+            else:
+                ac.append(_PARAM_LABEL[sig][0])
+                continue
         label, unit, nd = _PARAM_LABEL[sig]
         if tandem and sig in _LEAD:
             label = _LEAD[sig]
@@ -63,6 +83,8 @@ def _arc_sentence(stats: dict, tandem: bool, process: str) -> str | None:
         parts.append(txt)
     if process == "SAW" and "gas_lpm" not in stats:
         parts.append("no shielding gas (flux-shielded)")
+    if ac:
+        parts.append(" and ".join(ac) + " AC (no RMS logged)")
     return ("Recorded arc data: " + ", ".join(parts) + ".") if parts else None
 
 

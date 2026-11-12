@@ -172,3 +172,28 @@ def test_live_ingest_roundtrip(monkeypatch, tmp_path):
     client = common.connect()
     for seq in (SAW, GMAW):
         client.sequence_delete(seq)
+
+
+def test_ac_trail_electrode_uses_rms_and_real_excursions_merge(offline):
+    from mosaico_io import query
+    from mosaico_io.common import load_meta, offline_signals
+    meta, df = load_meta(SAW), offline_signals(SAW)
+    df = df.copy()
+    rms = df["current2_a"].to_numpy().copy()
+    df["current2_a"] = rms * np.sqrt(2) * np.sin(2 * np.pi * 50 * df["t_s"].to_numpy() + 0.3)   # AC: mean ~0
+    df["current2_rms_a"] = rms
+    assert query.violations_from_signals(df, meta) == []          # the ~0 mean is not a "low current" excursion
+    df.loc[(df["t_s"] > 10) & (df["t_s"] < 12), "current2_rms_a"] = 720.0
+    v = query.violations_from_signals(df, meta)
+    assert [(x["param"], x.get("basis")) for x in v] == [("current2_a", "rms")]
+    df2 = offline_signals(SAW).drop(columns=[])
+    df2["current2_a"] = df["current2_a"]                          # AC without an RMS column -> skipped
+    assert query.violations_from_signals(df2, meta) == []
+    # real data: excursions < 1 s apart become one record; the arc-start ramp (first 2 s) is ignored
+    df3 = offline_signals(SAW).copy()
+    t = df3["t_s"]
+    df3.loc[t < 1.5, "current_a"] = 200.0
+    for a in (10.0, 10.6, 11.2):
+        df3.loc[(t > a) & (t < a + 0.4), "current_a"] = 400.0
+    v3 = query.violations_from_signals(df3, meta)
+    assert len(v3) == 1 and v3[0]["param"] == "current_a" and v3[0]["t_start_s"] < 10.5 < 11.2 < v3[0]["t_end_s"]

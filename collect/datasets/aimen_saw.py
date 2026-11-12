@@ -693,6 +693,11 @@ def convert_bead(h5_path: Path, coupon: str, bead: int, n_beads: int, xls: dict,
             if nominal.get(k):
                 meta["wps"][k] = [round(nominal[k] * 0.9, 4), round(nominal[k] * 1.1, 4)]
     meta["wps"]["note"] = "gas_lpm [0,0]: SAW is flux-shielded (no shielding gas)"
+    # The recorded wire-speed channels read 7-35 % below the commanded value for whole passes (and are all zero
+    # on 16 PP5/PP6 beads): a calibration/units issue of the logger, not a process excursion. Shown, not checked.
+    meta["wps"]["unchecked"] = ["wfs_mpm", "wfs2_mpm"]
+    meta["wps"]["unchecked_reason"] = ("wire-speed channel reads 7-35 % below the commanded value for whole passes "
+                                       "(logger calibration/units unknown) - displayed, not checked")
     meta["setpoints"] = {k: v for k, v in nominal.items() if v is not None}
     meta["setpoints"]["gas_lpm"] = None
     meta["nominal"] = {"setting_code": setting_code, "ts_cm_min": st.get("ts_cm_min"),

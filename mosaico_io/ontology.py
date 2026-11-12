@@ -43,6 +43,9 @@ class WeldArc(Serializable):
     voltage2_v: Optional[MosaicoType.float64] = _opt("Trail electrode voltage, raw sample [V] (tandem only)")
     wfs2_mpm: Optional[MosaicoType.float64] = _opt("Trail electrode wire feed speed [m/min] (tandem only)")
     current2_avg_a: Optional[MosaicoType.float64] = _opt("Trail current, 0.5 s moving average [A]")
+    current_rms_a: Optional[MosaicoType.float64] = _opt("Lead current, 10 ms RMS [A] (AC / pulsed processes)")
+    current2_rms_a: Optional[MosaicoType.float64] = _opt("Trail current, 10 ms RMS [A] (AC trail electrode, AIMEN)")
+    voltage2_rms_v: Optional[MosaicoType.float64] = _opt("Trail voltage, 10 ms RMS [V]")
     voltage2_avg_v: Optional[MosaicoType.float64] = _opt("Trail voltage, 0.5 s moving average [V]")
     wfs2_avg_mpm: Optional[MosaicoType.float64] = _opt("Trail wire feed, 0.5 s moving average [m/min]")
 
@@ -80,6 +83,7 @@ PARAM_INDEX = {
     "current2_a": ("/weld/arc", WeldArc, "current2_avg_a"),
     "voltage2_v": ("/weld/arc", WeldArc, "voltage2_avg_v"),
     "wfs2_mpm": ("/weld/arc", WeldArc, "wfs2_avg_mpm"),
+    "current2_rms_a": ("/weld/arc", WeldArc, "current2_rms_a"),
     "travel_speed_mmps": ("/weld/travel", WeldTravel, "travel_speed_mmps"),
     "heat_input_kj_mm": ("/weld/travel", WeldTravel, "heat_input_kj_mm"),
     "positioner_deg": ("/weld/travel", WeldTravel, "positioner_deg"),

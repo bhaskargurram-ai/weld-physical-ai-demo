@@ -127,6 +127,7 @@ def ingest_pass_dir(path, client=None, replace: bool = True, camera_fps: Optiona
         if c not in arc.columns:
             arc[c] = np.nan
     arc_extra = _opt_cols(arc, ("current2_a", "voltage2_v", "wfs2_mpm"))
+    arc_rms = _opt_cols(arc, ("current_rms_a", "current2_rms_a", "voltage2_rms_v"))
     arc_avg = {c: movavg(arc[c].to_numpy(dtype=float), n_avg) for c in arc_cols + arc_extra}
     avg_name = {"current_a": "current_avg_a", "voltage_v": "voltage_avg_v", "wfs_mpm": "wfs_avg_mpm",
                 "gas_lpm": "gas_avg_lpm", "current2_a": "current2_avg_a", "voltage2_v": "voltage2_avg_v",
@@ -157,11 +158,11 @@ def ingest_pass_dir(path, client=None, replace: bool = True, camera_fps: Optiona
         units = {"current": "A", "voltage": "V", "wfs": "m/min", "gas": "L/min"}
         tw = sw.topic_create(TOPIC_ARC, metadata_safe({
             "rate_hz": _rate_hz(arc["t_ns"].to_numpy(), ARC_HZ), "units": units, "avg_window_s": 0.5,
-            "electrodes": int(meta.get("electrodes") or 1), "trail_fields": arc_extra,
+            "electrodes": int(meta.get("electrodes") or 1), "trail_fields": arc_extra, "rms_fields": arc_rms,
             "gas": "none (flux-shielded SAW): gas_lpm is NaN" if not arc["gas_lpm"].notna().any() else "measured"}),
             WeldArc)
         ts = arc["t_ns"].to_numpy()
-        cols = {c: arc[c].to_numpy(dtype=float) for c in arc_cols + arc_extra}
+        cols = {c: arc[c].to_numpy(dtype=float) for c in arc_cols + arc_extra + arc_rms}
         for i in range(len(ts)):
             kw = {c: _f(cols[c][i]) for c in cols}
             kw.update({avg_name[c]: _f(arc_avg[c][i]) for c in arc_avg})
