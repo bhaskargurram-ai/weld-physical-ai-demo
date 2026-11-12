@@ -381,7 +381,7 @@ class Toolbox:
                     seq = other
                     ctx["last_sequence"] = seq
                     t = self._event_time(seq, event)
-        t = float(t or 0.0)
+        t = max(0.0, float(t or 0.0))      # NDT positions can map to just before arc start
         action = {"action": "show_weld", "sequence": seq, "t": round(t, 2)}
         if view:
             action["view"] = view

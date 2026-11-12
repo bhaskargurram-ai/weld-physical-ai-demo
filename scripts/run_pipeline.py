@@ -236,8 +236,9 @@ def make_stages(a: argparse.Namespace) -> list[Stage]:
               lambda a: _n_passes_by_source(gen)),
         Stage("ingest", "Ingest passes into Mosaico", "mosaico_io.ingest", b_ingest,
               lambda a: f"{_n_dirs(gen)} sequences"),
-        Stage("export", "Query + export 5 s clips with sensor sidecars", "mosaico_io.export", b_export,
-              lambda a: f"{_n_files(exp, '*.mp4')} clips"),
+        Stage("export", "Query + export 5 s clips / photo windows with sensor sidecars", "mosaico_io.export", b_export,
+              lambda a: f"{_n_files(exp, '*.json')} windows: {_n_files(exp, '*.mp4')} clips, "
+                        f"{_n_files(exp, 'photos/*/*.jpg')} bead photos"),
         Stage("curate", "Curate (cut / caption / embed / filter)", "curate.run", b_curate,
               lambda a: _manifest_stats(cur / "manifest.jsonl")),
         Stage("warm-cache", "Pre-compute Cosmos 3 verdicts & showcase videos", "worldmodels.cli", b_warm,

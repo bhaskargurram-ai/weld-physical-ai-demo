@@ -449,9 +449,12 @@ function renderTimeline() {
   const d = S.dur || 1;
   const wins = S.detail.defect_windows || [];
   const labelled = new Set();
+  let lastLbl = -1e9;
   wins.forEach((w) => {
     const c = defCol(w.defect);
-    const first = !labelled.has(w.defect); labelled.add(w.defect);
+    const pos = (w.t_start / d) * 100;
+    const first = !labelled.has(w.defect) && pos - lastLbl > 16;
+    if (first) { labelled.add(w.defect); lastLbl = pos; }
     const n = wins.filter((x) => x.defect === w.defect).length;
     marks.append(h("div", { class: "tl-mark defect", title: `${prettyDef(w.defect)} ${fmt(w.t_start)}–${fmt(w.t_end)} s${w.x_start_mm != null ? ` · x ${w.x_start_mm}–${w.x_end_mm} mm` : ""}`,
       style: { left: `${(w.t_start / d) * 100}%`, width: `${Math.max(0.5, ((w.t_end - w.t_start) / d) * 100)}%`,
@@ -533,7 +536,7 @@ function buildCharts() {
   box.innerHTML = "";
   const sig = S.sig, wps = sig.wps || {};
   const params = chartParams();
-  const notes = Object.entries(sig.notes || {}).filter(([p]) => CHART_PARAMS.includes(p));
+  const notes = Object.entries(sig.notes || {}).filter(([p, n]) => CHART_PARAMS.includes(p) || (Object.values(TRAIL).includes(p) && !n.includes("RMS shown")));
   const wins = S.detail.defect_windows || [];
   const strip = wins.length > 0 || (S.detail.ndt && S.detail.ndt.inspected !== undefined && !S.detail.source?.synthetic);
   const stripH = strip ? 22 : 0;
@@ -549,7 +552,8 @@ function buildCharts() {
     const limTxt = lim ? (lim[0] == null ? `≤ ${lim[1]}` : `${fmt(lim[0], SIG[p].d)}–${fmt(lim[1], SIG[p].d)}`) : "";
     const row = h("div", { class: `chart-row ${viol.length ? "bad" : ""}` },
       h("div", { class: "chart-lbl" }, h("div", { class: "n" }, SIG[p].n,
-          trail ? h("span", { class: "leg", title: "blue = lead electrode, violet = trail electrode" }, h("i", { class: "l" }), h("i", { class: "t" }), "L/T") : null),
+          trail ? h("span", { class: "leg", title: `blue = lead electrode, violet = trail electrode${(sig.notes || {})[trail] ? `\n${sig.notes[trail]}` : ""}` },
+            h("i", { class: "l" }), h("i", { class: "t" }), (sig.notes || {})[trail] ? "L/T rms" : "L/T") : null),
         h("div", { class: "val", id: `val-${p}` }, "—"),
         lim ? h("div", { class: "lim", title: basis ? `WPS basis: ${basis}` : "WPS limits" }, `${basis ? "WPS*" : "WPS"} ${limTxt}`) : null),
       h("div", { class: "chart-box" }));

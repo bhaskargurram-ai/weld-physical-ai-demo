@@ -596,16 +596,25 @@ def convert_bead(h5_path: Path, coupon: str, bead: int, n_beads: int, xls: dict,
         arc["current2_rms_a"] = np.sqrt(np.maximum(g1["current2_rms_a"], 0.0))
     power = g1["power_a_w"].to_numpy() + (g1["power_b_w"].to_numpy() if tandem else 0.0)
     x_robot = g0["x"].to_numpy()
-    travel = pd.DataFrame({"t_s": g1["t_s"], "travel_speed_mmps": g0["travel_speed_mmps"],
-                           "position_mm": x_robot - x_robot[0],
-                           "heat_input_kj_mm": C.heat_input_kj_mm(power, g0["travel_speed_mmps"].to_numpy())})
-    # avoid absurd HI where the carriage is (nearly) stopped
-    travel.loc[travel["travel_speed_mmps"] < 0.5, "heat_input_kj_mm"] = np.nan
+    xr = d0["x"].astype(np.float64)
+    robot_ok = bool(np.ptp(xr) > 1.0)          # some beads have no robot position logged (constant 0.05)
+    if robot_ok:
+        travel = pd.DataFrame({"t_s": g1["t_s"], "travel_speed_mmps": g0["travel_speed_mmps"],
+                               "position_mm": x_robot - x_robot[0],
+                               "heat_input_kj_mm": C.heat_input_kj_mm(power, g0["travel_speed_mmps"].to_numpy())})
+        # avoid absurd HI where the carriage is (nearly) stopped
+        travel.loc[travel["travel_speed_mmps"] < 0.5, "heat_input_kj_mm"] = np.nan
+        hi_basis = "measured travel speed"
+    else:
+        ts_nom = (st.get("ts_cm_min") or np.nan) * 10.0 / 60.0
+        travel = pd.DataFrame({"t_s": g1["t_s"], "travel_speed_mmps": np.nan, "position_mm": np.nan,
+                               "heat_input_kj_mm": C.heat_input_kj_mm(power, np.full(len(power), ts_nom))})
+        hi_basis = "NOMINAL travel speed (robot x/y/z not recorded in this bead's HDF5)"
     thermal = pd.DataFrame({"t_s": g1["t_s"],
                             "interpass_c": np.maximum(g0["pyrometer_L"], g0["pyrometer_R"]),
                             "temp_left_c": g0["pyrometer_L"], "temp_right_c": g0["pyrometer_R"],
                             "temp_back_c": g0["pyrometer_back"]})
-    robot = pd.DataFrame({"t_s": g1["t_s"], "tcp_x": g0["x"], "tcp_y": g0["y"], "tcp_z": g0["z"]})
+    robot = pd.DataFrame({"t_s": g1["t_s"], "tcp_x": g0["x"], "tcp_y": g0["y"], "tcp_z": g0["z"]}) if robot_ok else None
 
     # --- NDT indications
     # robot-x <-> spreadsheet-x offset: x_robot(at idx_data1 == s0) - x_init_mm
@@ -619,7 +628,7 @@ def convert_bead(h5_path: Path, coupon: str, bead: int, n_beads: int, xls: dict,
         ts0, ts1 = (float(v) for v in sample_to_time([a, b], i_start, fs1, t1))
         xa, xb = (r["x0_mm"], r["x1_mm"]) if s0 <= s1 else (r["x1_mm"], r["x0_mm"])
         j = int(np.clip(np.searchsorted(idx01, s0), 0, len(idx01) - 1))
-        if r["x0_mm"] is not None and len(idx01):
+        if robot_ok and r["x0_mm"] is not None and len(idx01):
             offsets.append(float(d0["x"][j]) - r["x0_mm"])
         inds.append({"type": xls["defect_code"].get(r["defect_code"], f"code_{r['defect_code']}"),
                      "defect_code": r["defect_code"], "t_start": round(ts0, 4), "t_end": round(ts1, 4),
@@ -717,6 +726,8 @@ def convert_bead(h5_path: Path, coupon: str, bead: int, n_beads: int, xls: dict,
         "arc_window": f"lead current 10 ms mean > {ARC_ON_A:.0f} A (gaps < 0.5 s bridged); t=0 at arc start",
         "process_status_window_s": ps_window,
         "travel_speed": f"|d(x)/dt| of robot x (data0), {TRAVEL_SMOOTH_S} s centred moving average",
+        "heat_input_basis": hi_basis,
+        "robot_position_recorded": robot_ok,
         "heat_input": "HI [kJ/mm] = (V_a·I_a + V_b·I_b) / v_travel[mm/s] / 1000, η = 1 (arc energy); "
                       "powers = 10 ms means of instantaneous V·I; NaN where v_travel < 0.5 mm/s",
         "interpass_c": "max(pyrometer_L, pyrometer_R); pyrometer_back reads the pool/flux region (temp_back_c)",
@@ -741,7 +752,8 @@ def convert_bead(h5_path: Path, coupon: str, bead: int, n_beads: int, xls: dict,
     C.write_parquet(C.add_t_ns(arc, t0_ns), d / "arc.parquet")
     C.write_parquet(C.add_t_ns(travel, t0_ns), d / "travel.parquet")
     C.write_parquet(C.add_t_ns(thermal, t0_ns), d / "thermal.parquet")
-    C.write_parquet(C.add_t_ns(robot, t0_ns), d / "robot.parquet")
+    if robot is not None:
+        C.write_parquet(C.add_t_ns(robot, t0_ns), d / "robot.parquet")
     events = [C.event(t0_ns, 0.0, "arc_start", process="SAW", electrodes=electrodes),
               C.event(t0_ns, duration, "arc_stop")] + C.ndt_events(t0_ns, inds)
     C.write_events(d / "events.jsonl", events)
@@ -829,7 +841,7 @@ def convert(raw_dir: Path, out_dir: Path, coupons=None, **_opts) -> list[str]:
             log(f"{m['sequence_name']:<14} {m['pass_type']:<4} e={m['electrodes']} {m['duration_s']:6.1f}s "
                 f"I={ms['current_a']:.0f}/{m['setpoints'].get('current_a')} "
                 f"U={ms['voltage_v']:.1f}/{m['setpoints'].get('voltage_v')} "
-                f"v={ms['travel_speed_mmps']:.2f}/{m['setpoints'].get('travel_speed_mmps', float('nan')):.2f}mm/s "
+                f"v={ms['travel_speed_mmps'] if ms['travel_speed_mmps'] is not None else float('nan'):.2f}/{m['setpoints'].get('travel_speed_mmps', float('nan')):.2f}mm/s "
                 f"ind={len(m['ndt']['indications'])} {m['defect_types']}")
         # coupon-level RT verdict
         joint = ("reject" if "reject" in rx_verdicts else "accept") if rx_verdicts else \

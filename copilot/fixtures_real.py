@@ -90,10 +90,14 @@ def aimen_pass(out: Path, coupon: str, bead: int, dur: float, seed: int, indicat
     pos = np.cumsum(sig["travel_speed_mmps"]) / HZ
     heat = (sig["voltage_v"] * sig["current_a"] + sig["voltage2_v"] * sig["current2_a"]) / (1000 * np.clip(sig["travel_speed_mmps"], 0.5, None))
     t_ns = T0_NS + (t * 1e9).astype(np.int64)
+    # trail electrode is AC (as on the real coupons): its 10 ms means alias around zero, the RMS carries the level;
+    # like the real conversion there is a current RMS column but no voltage RMS
+    alias = np.sin(2 * np.pi * 9.7 * t + rng.uniform(0, 6))
     arc = pd.DataFrame({"t_ns": t_ns, "current_a": sig["current_a"].round(2), "voltage_v": sig["voltage_v"].round(3),
                         "wfs_mpm": sig["wfs_mpm"].round(3), "gas_lpm": np.full(n, np.nan),
-                        "current2_a": sig["current2_a"].round(2), "voltage2_v": sig["voltage2_v"].round(3),
-                        "wfs2_mpm": sig["wfs2_mpm"].round(3)})
+                        "current2_a": (sig["current2_a"] * 1.1 * alias).round(2),
+                        "voltage2_v": (sig["voltage2_v"] * 1.1 * alias).round(3),
+                        "wfs2_mpm": sig["wfs2_mpm"].round(3), "current2_rms_a": sig["current2_a"].round(2)})
     travel = pd.DataFrame({"t_ns": t_ns, "travel_speed_mmps": sig["travel_speed_mmps"].round(3),
                            "position_mm": pos.round(2), "heat_input_kj_mm": heat.round(3)})
     tt = np.arange(int(dur * 10)) / 10

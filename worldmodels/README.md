@@ -18,6 +18,19 @@ transfer.sim2real_multi({"edge": e, "depth": d}, "photoreal FCAW fill pass")    
 anomaly.synth_defect("bead.png", "porosity")                                                                 # -> png
 ```
 
+Real data (docs/REAL_DATA.md): `assess_clip` auto-detects photos by extension (`.jpg/.jpeg/.png`; also
+`reason.assess_image`) and sends them as an OpenAI `image_url` part (no video sampling kwargs); the cache key uses
+`{"image": sha256}` instead of `{"video": sha256}`, so moving or renaming a file keeps its cached answer. Results carry
+`media_type`. `chat_meta(messages, image_path=...)` does the same for chat. The prompts (`PROMPT_VERSION weldqa-v2`)
+describe the real setups (SA-516 Gr.70 / S355, tandem SAW / GMAW, lead + trail electrode ranges, the HDR grayscale
+BAM camera or the post-weld photo) and include the NDT record (indications with time and x position) for real
+sources; the heuristic fallback returns `review` for an NDT indication of unknown size, `reject` for LOF / cracks,
+and states "no electrical signature" whenever the signals are normal. `weld_scene_prompt(..., source="bam_tgmaw"|
+"aimen_saw")` (set automatically by warm-cache from the picked clip / pass) wraps what-if / transfer prompts in the
+real scene. Warm cache: `--limit` video clips + `--photo-limit` photos are assessed; what-if image jobs use the middle
+frame of a kept real (BAM) video clip; transfer jobs use the first pass with `control/edge.mp4` (BAM: Canny edges of
+the real video), real passes first.
+
 Every call has a `*_meta` twin (`what_if_meta`, `sim2real_meta`, `chat_meta`, `explain_signals_meta`,
 `synth_defect_meta`) that returns `{path|text, source, latency_ms, cache_key, request, ...}`;
 `generate.read_sidecar(mp4)` gives the same for a returned path.

@@ -63,6 +63,21 @@ metadata keys plus `defects`, `wps` and `setpoints`.
   the pass's `torch_cam.mp4` when present, otherwise rebuilt from the JPEG frames stored in
   `/camera/torch/image`.
 
+## Real data (docs/REAL_DATA.md)
+
+Only `meta.json`, `arc.parquet` and `events.jsonl` are required; travel / thermal / robot parquet, `torch_cam.mp4`,
+`control/*` and `photos/*.jpg` are ingested when present and skipped otherwise. Tandem passes add the trail electrode
+as `current2_a, voltage2_v, wfs2_mpm` (+ `*2_avg_*`) on `WeldArc`; `gas_lpm` is NaN on SAW; `WeldThermal` carries
+`temp_left_c / temp_right_c / temp_back_c` (AIMEN pyrometers) or `thermo2_c` (BAM) as optional fields.
+`get_signals` always returns the core columns (NaN when a dataset lacks them; `positioner_deg` only for the
+simulator) followed by the extras present. `wps_violations` skips parameters whose range or signal is missing.
+Export: passes with video -> clips around NDT indications + clean windows at the source frame rate; passes without
+video -> one sidecar per indication window with `media_type: "image"`, `video: null`, `photos: [photos/<seq>/*.jpg]`,
+`photo_note` (indication x position) — curation and Cosmos use the photo. Sidecars also carry `source`
+(id, license, doi, attribution), `ndt`, `electrodes`, `video_kind`; the old `source: local|mosaico` field is now
+`read_from`. `python -m mosaico_io.export --data-source real|sim|all` limits the default sequence set.
+`python -m mosaico_io.testdata <dir>` writes a contract-compliant two-pass fixture.
+
 ## Topics and ontology choice
 
 | Topic | Ontology | Rate | Notes |
@@ -72,7 +87,8 @@ metadata keys plus `defects`, `wps` and `setpoints`.
 | `/weld/thermal` | **`WeldThermal`** (custom) | 10 Hz | `interpass_c` raw + `interpass_avg_c` (1 s median) |
 | `/robot/joint_states` | `RobotJoint` | 50 Hz | names j1..j6, positions [rad], velocities (finite diff), efforts 0 |
 | `/robot/tcp_pose` | `Pose` | 50 Hz | torch TCP in robot base frame [m] + quaternion |
-| `/camera/torch/image` | `CompressedImage` (JPEG q80) | 12 fps | `MOSAICO_CAMERA_FPS` / `--camera-fps 24` for full rate |
+| `/camera/torch/image` | `CompressedImage` (JPEG q80) | 12 fps | `MOSAICO_CAMERA_FPS` / `--camera-fps 24` for full rate; real video (BAM, 17.96 fps) at its own rate, stamped `t0 + frame time + video.t_offset_s` |
+| `/camera/bead/photo` | `CompressedImage` (JPEG) | per pass | post-weld bead photos (AIMEN), stamped after arc stop; topic metadata `files` keeps the names |
 | `/weld/events` | `String` | events | JSON `{t_ns, type: arc_start/arc_stop/defect_on/defect_off, defect?, severity?}` |
 
 **Why a custom ontology (not `Floating64` topics):** the custom-ontology path in the SDK is
@@ -88,12 +104,14 @@ excursion (use `raw=True` to query raw samples). Readers must `import mosaico_io
 **Sequence metadata** = full `meta.json` (nested `wps`, `setpoints` kept; `defects` as a list)
 plus flat queryable keys: `process, wps_id, spool_id, joint_id, pass_no, pass_type, position,
 material, rt_result, joint_rt_result, has_defect, defect_types, max_severity, t0_ns,
-heat_input_mean_kj_mm, interpass_start_c, interpass_max_c, ...`. Metadata keys may not contain
-`/`, so the topic list is stored as records under `topics`.
+heat_input_mean_kj_mm, interpass_start_c, interpass_max_c, electrodes, thickness_mm, source_id, source_license,
+source_doi, synthetic, ndt_inspected, n_indications, has_video, n_photos, ...` (nested `source`, `ndt`, `photos`,
+`video` kept). Metadata keys may not contain `/`, `.` or `:` (nested keys are sanitised to `_`), so the topic list
+is stored as records under `topics`.
 
 ## Tests
 
 ```bash
-pytest tests/test_mosaico_io.py              # offline tests + live round-trip if mosaicod is up
+pytest tests/test_mosaico_io.py tests/test_mosaico_io_real.py   # offline + live round-trip if mosaicod is up
 pytest tests/test_mosaico_io.py -m mosaico   # only the live round-trip (skipped if :6726 is closed)
 ```

@@ -10,9 +10,28 @@ Built on open-source infrastructure: **[Mosaico](https://github.com/mosaico-labs
 **[NVIDIA Cosmos 3](https://github.com/NVIDIA/cosmos)** (Reasoner and Generator world models). It runs on a laptop
 (CPU, replay mode) or on a RunPod GPU pod.
 
-> **Data notice.** All weld data in this repository is **synthetic**. It comes from the WeldCell simulator (`collect/`), which is
-> modelled on typical ASME Section IX / B31.3 carbon-steel pipe work (A106 Gr.B, GTAW root, FCAW fill and cap, SAW vessel
-> seams). It contains **no customer data**. Spool, joint and vessel IDs such as `SP-1043` and `V-207` are fictitious.
+> **Data notice.** By default the demo runs on **real, public welding data** (both CC BY 4.0, attribution shown in the
+> app and on the dataset card). The WeldCell **simulator** is still available (`DATA_SOURCE=sim`); its passes are tagged
+> `source.synthetic: true` and use fictitious IDs such as `SP-1043`. No customer data is included. See
+> [docs/REAL_DATA.md](docs/REAL_DATA.md) for the full data contract.
+
+### Data
+
+| `source.id` | dataset (CC BY 4.0) | what the demo uses | passes |
+|---|---|---|---|
+| `aimen_saw` | Tapia Suárez E. A., Pérez Couñago I., Eike Precker C., Fernández Montenegro J. M., Ruiz C. (AIMEN) — *Submerged Arc Welding Open Repository* (PENELOPE, H2020 GA 958303). Zenodo, [DOI 10.5281/zenodo.15083865](https://doi.org/10.5281/zenodo.15083865) | two-wire tandem SAW on 52 mm SA-516 Gr.70N coupons PP3–PP7: lead + trail current/voltage/wire feed, pyrometers, torch position, **post-weld bead photos**, **RT/UT indications** (porosity, lack of fusion) with position. No video. | `PP5_B02_SAW` |
+| `bam_tgmaw` | Chaurasia P. K., Fabry Ç., Pittner A., Rethmeier M. (BAM) — *Tandem-GMAW: advanced pulsed and short-circuiting process mode experimental data*. Zenodo, [DOI 10.5281/zenodo.21824586](https://doi.org/10.5281/zenodo.21824586) | tandem GMAW layers on 30 mm S355J2+N: lead + trail electrical signals, gas flow, thermocouples, robot TCP, **HDR grayscale process-camera video** (BAM overlay kept) + its Canny edge map for Cosmos Transfer. Not NDT-inspected (`rt_result: not_inspected`). | `WID617_L3_TGMAW` |
+
+`DATA_SOURCE=real|sim|all` (default `real`) selects the collect stage: `real` runs
+`python -m collect.datasets.fetch` (`REAL_SOURCES`, `AIMEN_COUPONS` (default all PP3–PP7), `BAM_WIDS` (laptop
+default `617,630`, pod default `all`)), downloading into `DATA_DIR/raw/` (default `DATA_DIR=data/real`; AIMEN's
+12.7 GB zip is read remotely with HTTP range requests). Each pass becomes one Mosaico sequence; streams a dataset
+lacks are simply absent (SAW has no gas: `gas_lpm` is NaN; AIMEN has no video, so its NDT windows are exported as
+photo items with the bead photo; BAM has no NDT). The "WPS" ranges are the published nominal settings ±10 % — a
+demo assumption, not a qualified WPS. Real defects do not necessarily show in the electrical signals (the AIMEN
+porosity windows have the same mean current and voltage as clean weld), and the pipeline says so ("no electrical
+signature") instead of inventing one. `make fixture-real` writes a tiny contract-compliant fixture (one SAW + one
+tandem GMAW pass) for offline smoke runs.
 
 ![Weld Copilot dashboard](docs/img/copilot_dashboard.png)
 <!-- screenshots: docs/img/copilot_dashboard.png, copilot_chat_rootcause.png, whatif_video.png, sim2real.png,
@@ -64,12 +83,12 @@ Needs Python 3.10+ and `make`. Docker is optional and adds a real Mosaico server
 
 ```bash
 git clone <this-repo-url> weldworld && cd weldworld
-make demo-local          # venv → simulate 24 passes → (Mosaico if Docker) → export → curate-lite → copilot
+make demo-local          # venv → fetch real data → (Mosaico if Docker) → export → curate-lite → copilot
 # open http://localhost:7860
 ```
 
 `make demo-local` uses `COSMOS_BACKEND=replay`: world-model answers come from the cache in `data/cache/worldmodels`,
-which a GPU run populates. Without Docker it runs Mosaico in **offline mode**, reading `data/generated/` directly with
+which a GPU run populates. Without Docker it runs Mosaico in **offline mode**, reading `data/real/generated/` directly with
 the same API. To show the UI with no pipeline run at all, use `make copilot-fixtures`.
 
 Step by step:
@@ -77,9 +96,10 @@ Step by step:
 ```bash
 make setup-local                 # .venv + requirements.txt, creates .env from configs/demo.env.example
 make infra-up                    # Postgres + mosaicod + MinIO (infra/docker-compose.yml)
-make simulate                    # data/generated/<SP-1043_J07_P3_FCAW>/ …
-make ingest                      # → Mosaico sequences
-make export                      # → data/export/<clip>.mp4 + .json
+make collect                     # real data → data/real/generated/<PP5_B02_SAW|WID617_L3_TGMAW>/ (AIMEN_COUPONS=PP5 BAM_WIDS=617 for a quick run)
+make simulate                    # or: the WeldCell simulator → data/generated/<SP-1043_J07_P3_FCAW>/ (DATA_SOURCE=sim)
+make ingest                      # → Mosaico sequences (+ /camera/bead/photo, /camera/torch/image when present)
+make export                      # → data/real/export/<clip>.mp4|photos/ + .json
 make curate                      # BACKEND=lite (default) | curator-next | curator-legacy
 make copilot                     # http://localhost:7860
 make test
@@ -103,7 +123,7 @@ python3 runpod/launch.py      # or: make cloud-run   (make cloud-serve keeps the
 
 1. creates (or reuses) a **300 GB network volume** in the data center with the best stock for `GPU_TYPE`
 2. creates the **GPU pod** (default 2× H100 80GB, CUDA 13 host) with the volume at `/workspace` and your keys as env vars
-3. the pod clones this repo and runs `runpod/pod_entry.sh`: bootstrap → Mosaico → simulate/ingest/export →
+3. the pod clones this repo and runs `runpod/pod_entry.sh`: bootstrap → Mosaico → fetch real data (all BAM workpieces)/ingest/export →
    Cosmos Curator → Cosmos 3 servers → warm cache → results in `/workspace/results/` (on the volume)
 4. streams the pod logs to your terminal and **terminates the pod when the code ends** — on success, on failure,
    on Ctrl-C, or after `MAX_HOURS`. The pod also terminates itself, so nothing keeps billing if your laptop sleeps.

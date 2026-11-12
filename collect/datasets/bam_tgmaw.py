@@ -562,10 +562,10 @@ def detect_arc_slots(frames: np.ndarray, slots: np.ndarray, arc_dur_slots: Optio
         return out
     cp = change_curve(stack)
     third = max(n // 3, 4)
-    # start: FIRST strong change (>= half the strongest in the first third), climbed to its local peak - the
+    # start: FIRST strong change (>= 60 % of the strongest in the first third), climbed to its local peak - the
     # weld pool keeps growing after ignition, so the strongest change can come a few frames later
     head = cp[:third]
-    s_ind = int(np.flatnonzero(head >= 0.5 * head.max())[0])
+    s_ind = int(np.flatnonzero(head >= 0.6 * head.max())[0])
     while s_ind + 1 < third and cp[s_ind + 1] > cp[s_ind]:
         s_ind += 1
     e_ind = int(n - third + np.argmax(cp[n - third:]))
@@ -857,37 +857,6 @@ def convert_layer(raw_dir: Path, out_dir: Path, wid: int, layer: int, exp: Optio
     wfs_cmd2 = (row.get("wfs_command_trailing") or _ps_const(pst, "WFS_COMMANDVALUE")) if tandem else None
     ps_wfs_cmd = {"lead": _ps_const(psl, "WFS_COMMANDVALUE"), "trail": _ps_const(pst, "WFS_COMMANDVALUE")}
 
-    nominal = {"current_a": rec_i1, "voltage_v": rec_u1, "wfs_mpm": wfs_cmd1, "travel_speed_mmps": wts}
-    if tandem:
-        nominal.update({"current2_a": rec_i2, "voltage2_v": rec_u2, "wfs2_mpm": wfs_cmd2})
-    gas_rng = [round(gas_cmd * 0.8, 3), round(gas_cmd * 1.2, 3)] if gas_cmd else None
-    hi_nom = None
-    if rec_i1 and rec_u1 and wts:
-        p_nom = rec_i1 * rec_u1 + ((rec_i2 or 0) * (rec_u2 or 0) if tandem else 0)
-        hi_nom = ARC_EFFICIENCY * p_nom / wts / 1000.0
-    hi_rng = [round(hi_nom * 0.9 ** 2 / 1.1, 4), round(hi_nom * 1.1 ** 2 / 0.9, 4)] if hi_nom else None
-    wps_id = f"BAM-WID{wid}-L{layer}"
-    if C is not None:
-        wps = C.wps_from_nominal(wps_id, "GMAW", nominal, tol=0.10, gas_lpm=gas_rng, heat_input_kj_mm=hi_rng)
-    else:
-        wps = {"wps_id": wps_id, "process": "GMAW"}
-        for k in ("current_a", "voltage_v", "travel_speed_mmps", "wfs_mpm"):
-            if nominal.get(k):
-                wps[k] = [round(nominal[k] * 0.9, 4), round(nominal[k] * 1.1, 4)]
-        wps["gas_lpm"] = gas_rng or [0.0, 0.0]
-        if hi_rng:
-            wps["heat_input_kj_mm"] = hi_rng
-        wps["tolerance"] = 0.10
-    if tandem:
-        for k in ("current2_a", "voltage2_v", "wfs2_mpm"):
-            if nominal.get(k):
-                wps[k] = [round(nominal[k] * 0.9, 4), round(nominal[k] * 1.1, 4)]
-    if wps.get("max_interpass_c") is None:
-        wps.pop("max_interpass_c", None)   # not published by BAM; don't invent a limit
-    wps["note"] = ("current/voltage nominal = Fronius synergic CURRENT_/VOLTAGE_RECOMMVALUE of the job; wfs = "
-                   "experiment_list wfs_command; travel = experiment_list wts; gas = GASVALUE ±20 %; heat input = "
-                   f"η {ARC_EFFICIENCY} × Σ(I·U)/wts with the ±10 % corners; no interpass limit published")
-
     # --- measured (steady part: skip first/last 2 s)
     t = arc["t_s"].to_numpy()
     steady = (t > 2.0) & (t < arc_on_s - 2.0)
@@ -922,6 +891,44 @@ def convert_layer(raw_dir: Path, out_dir: Path, wid: int, layer: int, exp: Optio
             mm = (ts_ > 2.0) & (ts_ < arc_on_s - 2.0)
             measured[f"{key}_{side}"] = _r(vs_[mm].mean()) if mm.any() else None
 
+    # --- WPS. Published commands: wfs (experiment_list) + wts + GASVALUE. Synergic GMAW has no current/voltage
+    # command; the Fronius "recommended" display values sit 10-25 % away from what the arc actually ran at, so
+    # current/voltage use this pass's measured steady-state mean (PQR-style: a WPS range around the values
+    # recorded during the qualifying weld). Recommended values are kept in meta.nominal.recommended.
+    nominal = {"current_a": measured["current_a"], "voltage_v": measured["voltage_v"], "wfs_mpm": wfs_cmd1,
+               "travel_speed_mmps": wts}
+    if tandem:
+        nominal.update({"current2_a": measured.get("current2_a"), "voltage2_v": measured.get("voltage2_v"),
+                        "wfs2_mpm": wfs_cmd2})
+    gas_rng = [round(gas_cmd * 0.8, 3), round(gas_cmd * 1.2, 3)] if gas_cmd else None
+    hi_nom = None
+    p_meas = (measured.get("power_lead_kw") or 0) + (measured.get("power_trail_kw") or 0)
+    if p_meas and wts:
+        hi_nom = ARC_EFFICIENCY * p_meas / wts   # kW / (mm/s) = kJ/mm
+    hi_rng = [round(hi_nom * 0.9 ** 2 / 1.1, 4), round(hi_nom * 1.1 ** 2 / 0.9, 4)] if hi_nom else None
+    wps_id = f"BAM-WID{wid}-L{layer}"
+    if C is not None:
+        wps = C.wps_from_nominal(wps_id, "GMAW", nominal, tol=0.10, gas_lpm=gas_rng, heat_input_kj_mm=hi_rng)
+    else:
+        wps = {"wps_id": wps_id, "process": "GMAW"}
+        for k in ("current_a", "voltage_v", "travel_speed_mmps", "wfs_mpm"):
+            if nominal.get(k):
+                wps[k] = [round(nominal[k] * 0.9, 4), round(nominal[k] * 1.1, 4)]
+        wps["gas_lpm"] = gas_rng or [0.0, 0.0]
+        if hi_rng:
+            wps["heat_input_kj_mm"] = hi_rng
+        wps["tolerance"] = 0.10
+    if tandem:
+        for k in ("current2_a", "voltage2_v", "wfs2_mpm"):
+            if nominal.get(k):
+                wps[k] = [round(nominal[k] * 0.9, 4), round(nominal[k] * 1.1, 4)]
+    if wps.get("max_interpass_c") is None:
+        wps.pop("max_interpass_c", None)   # not published by BAM; don't invent a limit
+    wps["note"] = ("wfs = experiment_list wfs_command ±10 %; travel = experiment_list wts ±10 %; gas = GASVALUE "
+                   "±20 %; current/voltage = this pass's measured steady-state mean ±10 % (PQR-style: no current/"
+                   "voltage command exists for synergic GMAW); heat input = η "
+                   f"{ARC_EFFICIENCY} × measured mean Σ(U·I) / wts with the ±10 % corners; no interpass limit published")
+
     gas_cmd2 = _ps_const(pst, "GASVALUE") if tandem else None
     anomalies = find_anomalies(arc, arc_on_s, gas_cmd, electrodes, trail_window, gas_cmd2)
 
@@ -948,8 +955,8 @@ def convert_layer(raw_dir: Path, out_dir: Path, wid: int, layer: int, exp: Optio
         "mode_leading": row.get("mode_leading"), "mode_trailing": row.get("mode_trailing") if tandem else None,
         "config": row.get("config") or ("tandem" if tandem else "single"),
         "wps": wps, "wps_basis": ("published nominal setting ±10 % (demo assumption, not a qualified WPS): "
-                                 "experiment_list wfs/wts commands, Fronius synergic recommended current/voltage, "
-                                 "GASVALUE ±20 %"),
+                                 "experiment_list wfs/wts commands ±10 %, GASVALUE ±20 %; current/voltage = the "
+                                 "pass's own measured mean ±10 % (PQR-style; synergic GMAW has no I/U command)"),
         "setpoints": {k: v for k, v in {**nominal, "gas_lpm": gas_cmd}.items() if v is not None},
         "nominal": {"wts_mmps": wts, "wfs_command_leading": row.get("wfs_command_leading"),
                     "wfs_command_trailing": row.get("wfs_command_trailing"),

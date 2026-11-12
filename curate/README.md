@@ -24,6 +24,16 @@ pytest -q tests/test_curate_lite.py tests/test_curate_configs.py
 | `dataset_card.md` / `.json` | kept/rejected by reason, defect distribution, hours, WPS deviations, caption models, quality stats |
 | `configs/` | curator backends: generated YAML / legacy command, `weld_caption_prompt.txt` |
 
+Real data (docs/REAL_DATA.md): photo-only export sidecars (`media_type: "image"`, `photos: [...]`, no mp4 — AIMEN
+SAW NDT windows) become **image items** (`clips/<clip_id>.jpg`, one per photo, `_p<k>` suffix when a window has
+several): photo quality (blur, glare, exposure; `motion`/`arc_on_frac` are null), the same embedding layout, template
+caption from the sidecar + `photo_note`, or the Reasoner with `WELD_PHOTO_CAPTION_PROMPT` (`image_url`). `curator-next`
+/ `curator-legacy` send only video to Curator; image items take the lite path and are merged into the manifest.
+Manifest rows gain `media_type` (`video` | `image`) and `source` (`id, license, attribution, doi, url, title,
+synthetic`); the dataset card lists every source with license and attribution. Captions of real items describe the
+data (camera type, e.g. "HDR process camera footage, grayscale, with the BAM data overlay"; setup; recorded signals;
+NDT result; "no signature" when the signals are normal) and never the simulator's visual process cues.
+
 Notes on manifest fields:
 - `t0_s/t1_s` are pass time (sidecar `t0_s` + offset inside the exported clip). `start_ns/end_ns` in Lance are offsets inside the source mp4 (Curator semantics).
 - `generator_prompt` is a **JSON string** (the `photoreal_transfer` variant) — pass it straight to

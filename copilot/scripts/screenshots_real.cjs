@@ -7,7 +7,7 @@ const { chromium } = require("playwright");
 
 const BASE = process.argv[2] || "http://localhost:7860";
 const OUT = process.argv[3] || path.join(__dirname, "..", "..", "docs", "img");
-const SAW = process.argv[4] || "PP5_B02_SAW";
+const SAW = process.argv[4] || "PP5_B03_SAW";
 const BAM = process.argv[5] || "WID617_L3_TGMAW";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -29,8 +29,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await sleep(800);
 
   // 1) SAW pass: NDT strip + bead photo, after "did the arc signals change?"
-  const saw = await page.evaluate((s) => S.passes.find((p) => p.sequence_name === s)?.sequence_name
-    || S.passes.filter((p) => !p.synthetic && p.rt_result === "indications" && p.has_photo)[0]?.sequence_name, SAW);
+  // a SAW bead with NDT indications AND a bead photo (most indication types first)
+  const saw = await page.evaluate((s) => S.passes.find((p) => p.sequence_name === s && p.has_photo)?.sequence_name
+    || S.passes.filter((p) => !p.synthetic && p.rt_result === "indications" && p.has_photo)
+      .sort((a, b) => Object.keys(b.defect_counts).length - Object.keys(a.defect_counts).length)[0]?.sequence_name, SAW);
   const sawRef = saw.replace(/^(PP\d+)_B0?(\d+)_.*/, "$1 bead $2");
   const d0 = await page.evaluate((s) => Object.keys(S.passes.find((p) => p.sequence_name === s).defect_counts || {})[0] || "porosity", saw);
   await say(`Show ${d0.replace(/_/g, " ")} on ${sawRef} — did the arc signals change?`);

@@ -88,7 +88,10 @@ def test_saw_pass_detail_photo_ndt_and_signals(client):
     assert "flux" in d["signal_notes"]["gas_lpm"] and "±10 %" in d["wps_basis"]
     assert client.get(d["media"]["photos"][0]["url"]).status_code == 200
     s = client.get("/api/passes/PP5_B02_SAW/signals", params={"hz": 10}).json()
-    assert "gas_lpm" not in s["series"] and {"current2_a", "voltage2_v"} <= set(s["series"])
+    assert "gas_lpm" not in s["series"] and "current2_a" in s["series"]
+    # AC trail electrode: RMS replaces the meaningless 10 ms mean; the voltage has no RMS so it is not plotted
+    assert min(v for v in s["series"]["current2_a"] if v is not None) > 0 and "RMS shown" in s["notes"]["current2_a"]
+    assert "voltage2_v" not in s["series"] and "AC electrode" in s["notes"]["voltage2_v"]
     assert s["electrodes"] == 2 and s["notes"]["gas_lpm"] and "current_a" in s["wps"]
     assert no_nan(d) and no_nan(s)
 
@@ -223,11 +226,28 @@ def test_chat_porosity_signal_check_says_no_signature(client):
 
 def test_chat_ndt_question_and_suggestions(client):
     sug = client.get("/api/suggestions").json()
-    assert [d["label"] for d in sug["demo"]] == [t for t, _ in REAL_DEMO]
+    labels = [d["label"] for d in sug["demo"]]
+    assert labels[:5] == [t for t, _ in REAL_DEMO[:5]]                 # chips point at passes that exist and fit
+    assert labels[5].startswith("What if travel speed dropped 20 % on WID")
     text = "".join(e.get("delta", "") for e in sse(client.post(
         "/api/chat", json={"message": REAL_DEMO[0][0]}).text) if e.get("type") == "text")
     assert "2 of 4 inspected passes have NDT indications" in text and "not inspected" in text
     assert "SIMULATED" in text   # the simulator pass with RT reject is marked, never passed off as real
+
+
+def test_demo_chips_follow_the_data():
+    from copilot.app import demo_flow_real
+    rows = [{"sequence_name": "PP5_B02_SAW", "spool_id": "PP5", "pass_no": 2, "pass_label": "Bead 2", "rt_result": "indications",
+             "defect_counts": {"porosity": 14}, "has_photo": False, "material": "SA-516 Gr.70N", "ndt_inspected": True},
+            {"sequence_name": "PP5_B03_SAW", "spool_id": "PP5", "pass_no": 3, "pass_label": "Bead 3", "rt_result": "indications",
+             "defect_counts": {"porosity": 20}, "has_photo": True, "ndt_inspected": True},
+            {"sequence_name": "WID617_L2_TGMAW", "spool_id": "WID617", "pass_no": 2, "pass_label": "Layer 2", "electrodes": 2,
+             "source_id": "bam_tgmaw", "has_video": True, "rt_result": "not_inspected"}]
+    labels = [c["label"] for c in demo_flow_real(rows)]
+    assert "Show porosity on PP5 bead 2 — did the arc signals change?" in labels
+    assert "Inspect the bead photo of PP5 bead 3" in labels           # bead 2 has no photo in the AIMEN release
+    assert "Compare lead vs trail current on WID617 layer 2" in labels
+    assert labels[0] == "Which SA-516 vessel passes had NDT indications?"
 
 
 def test_system_prompt_forbids_invented_causes(client):

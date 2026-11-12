@@ -173,6 +173,29 @@ def _normalize_row(m: dict) -> dict:
     return row
 
 
+def _fix_ac_channels(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """AC electrodes (AIMEN's trail wire) swing positive and negative: their 10 ms means are noise around zero.
+    Use the `<name>_rms_<unit>` column when the conversion provides one, else blank the channel (never plot or
+    check a meaningless mean)."""
+    ac: dict[str, str] = {}
+    for p in ("current_a", "voltage_v", "current2_a", "voltage2_v"):
+        if p not in df.columns or not df[p].notna().any():
+            continue
+        x = df[p].values.astype(float)
+        on = np.abs(x) > (5.0 if p.startswith("current") else 2.0)
+        if on.sum() < 20 or (x[on] < 0).mean() < 0.1:
+            continue
+        rms = p.rsplit("_", 1)[0] + "_rms_" + p.rsplit("_", 1)[1]
+        df = df.copy()
+        if rms in df.columns and df[rms].notna().any():
+            df[p] = df[rms]
+            ac[p] = "rms"
+        else:
+            df[p] = np.nan
+            ac[p] = "no_rms"
+    return df, ac
+
+
 def _pass_label(src: dict, n: int) -> str:
     w = src.get("pass_word") or "P"
     return f"{w} {n}" if len(w) > 1 else f"{w}{n}"
@@ -185,6 +208,7 @@ class DataLayer:
         self._lock = threading.RLock()
         self._sig_cache: dict[str, pd.DataFrame] = {}
         self._viol_cache: dict[str, list] = {}
+        self._ac_cache: dict[str, dict] = {}
         self._rows_cache: tuple[float, list[dict]] | None = None
         self.last_source = "local"
 
@@ -203,6 +227,7 @@ class DataLayer:
         with self._lock:
             self._sig_cache.clear()
             self._viol_cache.clear()
+            self._ac_cache.clear()
             self._rows_cache = None
 
     # -------------------------------------------------------------- passes
@@ -422,6 +447,9 @@ class DataLayer:
                     df = None
             if df is None:
                 df = self._local_signals(seq)
+            df, ac = _fix_ac_channels(df)
+            with self._lock:
+                self._ac_cache[seq] = ac
             if "heat_input_kj_mm" not in df.columns and {"current_a", "voltage_v", "travel_speed_mmps"} <= set(df.columns):
                 meta = self.get_meta(seq)
                 eff = 1.0 if str(meta.get("process", "")).upper() == "SAW" else 0.8
@@ -464,6 +492,10 @@ class DataLayer:
             notes["travel_speed_mmps"] = "no travel-speed stream in this dataset"
         if "interpass_c" not in avail:
             notes["interpass_c"] = "no temperature stream in this dataset"
+        for p, kind in (self._ac_cache.get(seq) or {}).items():
+            name = SIGNAL_INFO.get(p, {}).get("label", p)
+            notes[p] = (f"{name}: AC electrode — RMS shown (10 ms means of an AC signal are meaningless)" if kind == "rms"
+                        else f"AC electrode — no RMS in this conversion, so not plotted or checked")
         return notes
 
     # -------------------------------------------------------------- NDT vs signals

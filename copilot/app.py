@@ -54,6 +54,43 @@ DEMO_FLOW_REAL = [
 ]
 
 
+def _ref(r: dict) -> str:
+    """'PP5 bead 2' / 'WID617 layer 3' for a pass row (the way people say it)."""
+    word = (r.get("pass_label") or "").split(" ")[0].lower() or "pass"
+    return f"{r['spool_id']} {word} {r['pass_no']}"
+
+
+def demo_flow_real(rows: list[dict]) -> list[dict]:
+    """The six real-data chips, each pointed at a pass that exists and fits (PP5 bead 2 has no bead photo in the
+    AIMEN release, so the photo chip moves to the nearest bead that has one)."""
+    real = [r for r in rows if not r.get("synthetic")]
+    by = {r["sequence_name"]: r for r in real}
+    n = lambda r, t: (r.get("defect_counts") or {}).get(t, 0)  # noqa: E731
+
+    def pick(pref: str, ok, key=lambda r: 0):
+        if pref in by and ok(by[pref]):
+            return by[pref]
+        c = sorted((r for r in real if ok(r)), key=key, reverse=True)
+        return c[0] if c else None
+    por = pick("PP5_B02_SAW", lambda r: n(r, "porosity") > 0, key=lambda r: (r["spool_id"] == "PP5", n(r, "porosity")))
+    tan = pick("WID617_L3_TGMAW", lambda r: r.get("electrodes", 1) > 1,
+               key=lambda r: (r.get("source_id") == "bam_tgmaw", r.get("has_video", False)))
+    pho = pick("PP5_B02_SAW", lambda r: r.get("has_photo") and r.get("rt_result") == "indications",
+               key=lambda r: (r["spool_id"] == (por or {}).get("spool_id"), sum((r.get("defect_counts") or {}).values())))
+    vid = pick("WID630_L4_TGMAW", lambda r: r.get("has_video") or r.get("has_photo"),
+               key=lambda r: (r.get("has_video", False), r.get("electrodes", 1)))
+    mats = sorted({r.get("material") for r in real if r.get("ndt_inspected") and r.get("material")})
+    chips = [
+        {"label": f"Which {mats[0].split(' ')[0] + ' vessel ' if mats else ''}passes had NDT indications?", "hint": "RT/UT ground truth"},
+        por and {"label": f"Show porosity on {_ref(por)} — did the arc signals change?", "hint": "Replay + honest signal check"},
+        tan and {"label": f"Compare lead vs trail current on {_ref(tan)}", "hint": "Tandem signals"},
+        {"label": "Which passes ran outside their published settings?", "hint": "Mosaico query"},
+        pho and {"label": f"Inspect the bead photo of {_ref(pho)}", "hint": "Cosmos 3 Reasoner · photo"},
+        vid and {"label": f"What if travel speed dropped 20 % on {_ref(vid)}?", "hint": "Cosmos 3 Generator"},
+    ]
+    return [c for c in chips if c]
+
+
 def create_app() -> FastAPI:
     if config.fixtures_mode() == "real":
         from .fixtures_real import ensure_fixtures as ensure_real
@@ -297,7 +334,7 @@ def create_app() -> FastAPI:
     @app.get("/api/suggestions")
     def suggestions():
         dm = data.data_mode()
-        return {"demo": DEMO_FLOW_REAL if dm["real"] else DEMO_FLOW, "data": dm}
+        return {"demo": demo_flow_real(data.all_passes()) if dm["real"] else DEMO_FLOW, "data": dm}
 
     @app.post("/api/chat")
     async def chat(body: dict = Body(...)):
