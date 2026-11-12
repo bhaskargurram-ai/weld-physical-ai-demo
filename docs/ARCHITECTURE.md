@@ -23,7 +23,7 @@ flowchart LR
   end
   subgraph S4["4 · WORLD MODELS (worldmodels/)"]
     REA["Cosmos3 Reasoner<br/>vLLM :8000/v1"]
-    GEN["Cosmos3 Generator / Transfer<br/>vLLM-Omni :8001"]
+    GEN["Cosmos3 Generator / Transfer<br/>vLLM-Omni :8010"]
     CACHE[("replay cache<br/>data/cache/worldmodels")]
   end
   subgraph S5["5 · WELD COPILOT (copilot/) :7860"]
@@ -128,7 +128,7 @@ to finish loading before it starts the Generator.
 | 6726 | mosaicod | 0.0.0.0 (`MOSAICOD_BIND`) | TCP (public IP, random external port), or an SSH tunnel |
 | 9000 | MinIO S3 API | 0.0.0.0 | internal |
 | 8000 | Cosmos3 Reasoner (vLLM) | per serve script | internal |
-| 8001 | Cosmos3 Generator (vLLM-Omni) | per serve script | internal |
+| 8010 | Cosmos3 Generator (vLLM-Omni) | per serve script | internal |
 | 5432 | Postgres | localhost | internal |
 | 22 | SSH | — | TCP |
 

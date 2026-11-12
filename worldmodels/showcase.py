@@ -200,6 +200,11 @@ def warm_cache(manifest: Optional[str | Path] = None, *, showcase: Optional[str 
 
     sc = load_showcase(showcase)
     frames_dir = s.cache_dir / "frames"
+    if do_generate or do_transfer:
+        from .config import health_url, probe, resolve_backend
+        gb = resolve_backend("generator", s)
+        log(f"generator backend: {gb} (health {health_url('generator', s)}: "
+            f"{'up' if probe(health_url('generator', s), timeout=5) else 'NOT answering'})")
     if do_generate:
         for job in sc.get("what_if", []):
             jid = job["id"]
@@ -232,6 +237,8 @@ def warm_cache(manifest: Optional[str | Path] = None, *, showcase: Optional[str 
                                           "latency_ms": meta["latency_ms"], "image": image, "video": video,
                                           "prompt": job["prompt"], "placeholder": meta.get("placeholder", False)}
                 log(f"what_if {jid}: {meta['source']} {meta['latency_ms']} ms -> {meta['path']}")
+                if meta.get("placeholder") or meta.get("error"):
+                    log(f"  ^ backend={meta.get('backend')} error={(meta.get('error') or 'generator not reachable')[:600]}")
             except Exception as e:
                 report["errors"].append(f"what_if {jid}: {e}")
                 log(f"! what_if {jid} failed: {e}\n{traceback.format_exc(limit=2)}")
@@ -262,6 +269,8 @@ def warm_cache(manifest: Optional[str | Path] = None, *, showcase: Optional[str 
                                            "data_source": scene.get("source"),
                                            "placeholder": meta.get("placeholder", False)}
                 log(f"transfer {jid}: {meta['source']} {meta['latency_ms']} ms -> {meta['path']}")
+                if meta.get("placeholder") or meta.get("error"):
+                    log(f"  ^ backend={meta.get('backend')} error={(meta.get('error') or 'generator not reachable')[:600]}")
             except Exception as e:
                 report["errors"].append(f"transfer {jid}: {e}")
                 log(f"! transfer {jid} failed: {e}")

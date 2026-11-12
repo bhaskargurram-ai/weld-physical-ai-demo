@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cosmos3-Nano Generator (text/image/video -> video, and control Transfer) on vLLM-Omni - port 8001.
+# Cosmos3-Nano Generator (text/image/video -> video, and control Transfer) on vLLM-Omni - port 8010.
 #
 #   bash worldmodels/serve/generator.sh                              # BF16 (dual-GPU default)
 #   GENERATOR_PRECISION=fp8 OFFLOAD=1 bash worldmodels/serve/generator.sh   # single-GPU budget
@@ -28,7 +28,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/common.sh"
 
 NGPU="$(gpu_count)"
-PORT="${GENERATOR_PORT:-8001}"
+PORT="${GENERATOR_PORT:-8010}"
 if [ -z "${GENERATOR_GPU:-}" ]; then
   if [ "${NGPU:-0}" -ge 2 ]; then GENERATOR_GPU=1; else GENERATOR_GPU=0; fi
 fi

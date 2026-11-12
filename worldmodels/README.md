@@ -54,7 +54,7 @@ put in the Reasoner prompt unless `COSMOS_PROMPT_INCLUDE_LABELS=1`; the heuristi
 and says so.
 
 Other env: `COSMOS_REASONER_URL` (http://localhost:8000/v1), `COSMOS_REASONER_MODEL` (nvidia/Cosmos3-Nano,
-`auto` = first of `/models`), `COSMOS_GENERATOR_URL` (http://localhost:8001), `NVIDIA_API_KEY`,
+`auto` = first of `/models`), `COSMOS_GENERATOR_URL` (http://localhost:8010), `NVIDIA_API_KEY`,
 `COSMOS_NIM_REASONER_URL/MODEL`, `COSMOS_NIM_GENERATOR_URL` (point at `http://localhost:8000` for a
 self-hosted Cosmos3 NIM container), `COSMOS_CACHE_DIR`, `COSMOS_CACHE=readwrite|write|read|off`
 (`write` = force fresh calls), `COSMOS_GEN_PRESET=live|showcase|smoke`, `COSMOS_TRANSFER_BACKEND=auto|omni|framework`,
@@ -72,7 +72,7 @@ python -m worldmodels.cli health                     # status of every endpoint,
 bash worldmodels/serve/install.sh                    # uv venvs: reasoner (vLLM) + generator (vLLM-Omni), weights
 INSTALL_FRAMEWORK=1 bash worldmodels/serve/install.sh   # optional: cosmos-framework for spec-based transfer
 DAEMON=1 bash worldmodels/serve/reasoner.sh          # :8000, GPU0
-DAEMON=1 bash worldmodels/serve/generator.sh         # :8001, GPU1 (1 GPU: GENERATOR_PRECISION=fp8 OFFLOAD=1)
+DAEMON=1 bash worldmodels/serve/generator.sh         # :8010, GPU1 (1 GPU: GENERATOR_PRECISION=fp8 OFFLOAD=1)
 python -m worldmodels.serve.healthcheck --deep
 
 # before the customer meeting: populate the replay cache

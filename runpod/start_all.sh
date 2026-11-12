@@ -128,6 +128,12 @@ start_models() {
     log "waiting for reasoner before starting the generator on the same GPU"
     wait_http "http://localhost:${REASONER_PORT}/v1/models" "${WAIT_S:-1800}" reasoner || true
   fi
+  # Runpod base images run nginx on 8001 -> 8000 (reasoner); never share a port with something else
+  if port_open "$GENERATOR_PORT" && ! is_running generator; then
+    warn "port ${GENERATOR_PORT} is already taken by another process - not starting the generator:"
+    (ss -ltnp 2>/dev/null | grep ":${GENERATOR_PORT} " >&2) || true
+    return
+  fi
   start_bg generator "${common[@]}" GENERATOR_GPU="$g_gpu" GENERATOR_PRECISION="$prec" OFFLOAD="$offload" \
     GENERATOR_PORT="$GENERATOR_PORT" bash "$gs"
 }
@@ -135,8 +141,8 @@ start_models() {
 wait_http() {  # wait_http <url> <timeout_s> <label>
   local url="$1" t="$2" label="$3" i
   for ((i = 0; i < t; i += 5)); do
-    if curl -fsS -m 3 -o /dev/null "$url"; then ok "$label ready (${i}s): $url"; return 0; fi
     if ! is_running "$label"; then warn "$label exited — tail ${LOG_DIR}/${label}.log:"; tail -n 20 "${LOG_DIR}/${label}.log" >&2; return 1; fi
+    if curl -fsS -m 3 -o /dev/null "$url"; then ok "$label ready (${i}s): $url"; return 0; fi
     sleep 5
   done
   warn "$label not ready after ${t}s"; return 1

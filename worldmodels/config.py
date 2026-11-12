@@ -101,7 +101,7 @@ class Settings:
     generator_backend: str = "auto"
     reasoner_url: str = "http://localhost:8000/v1"
     reasoner_model: str = "nvidia/Cosmos3-Nano"
-    generator_url: str = "http://localhost:8001"
+    generator_url: str = "http://localhost:8010"
     generator_model: str = ""                  # optional "model" form field for vLLM-Omni
     nvidia_api_key: str = ""
     nim_reasoner_url: str = NIM_REASONER_URL
@@ -151,7 +151,7 @@ def get_settings() -> Settings:
         generator_backend=_env("COSMOS_GENERATOR_BACKEND", backend).lower(),
         reasoner_url=_env("COSMOS_REASONER_URL", "http://localhost:8000/v1"),
         reasoner_model=_env("COSMOS_REASONER_MODEL", "nvidia/Cosmos3-Nano"),
-        generator_url=_env("COSMOS_GENERATOR_URL", "http://localhost:8001"),
+        generator_url=_env("COSMOS_GENERATOR_URL", "http://localhost:8010"),
         generator_model=_env("COSMOS_GENERATOR_MODEL", ""),
         nvidia_api_key=_env("NVIDIA_API_KEY", _env("NGC_API_KEY", "")),
         nim_reasoner_url=_env("COSMOS_NIM_REASONER_URL", NIM_REASONER_URL),

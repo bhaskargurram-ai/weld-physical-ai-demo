@@ -27,7 +27,7 @@ Facts below were checked against docs.runpod.io and runpod.io/pricing on **2026-
 | MinIO S3 API | 9000 | pod-internal | Curator Next `video-cut` only accepts `s3://` input |
 | Postgres | 5432 | pod-internal | Mosaico catalog |
 | Cosmos3 Reasoner (vLLM) | 8000 | pod-internal | OpenAI-compatible `/v1` |
-| Cosmos3 Generator (vLLM-Omni) | 8001 | pod-internal | `/v1/videos/sync` |
+| Cosmos3 Generator (vLLM-Omni) | 8010 | pod-internal | `/v1/videos/sync` |
 | SSH | 22 | TCP | |
 
 GPU memory plan (from `docs/research/cosmos3.md`):

@@ -100,7 +100,7 @@ reason.chat(messages, video_path=None) -> str
 generate.what_if(prompt, image_path=None, video_path=None, seconds=5, seed=0) -> str   # mp4 path
 transfer.sim2real(control_video, kind: "edge"|"depth", prompt, seed=0) -> str          # mp4 path
 ```
-Env: `COSMOS_REASONER_URL` (default http://localhost:8000/v1), `COSMOS_GENERATOR_URL` (http://localhost:8001),
+Env: `COSMOS_REASONER_URL` (default http://localhost:8000/v1), `COSMOS_GENERATOR_URL` (http://localhost:8010),
 `NVIDIA_API_KEY` (nim backend). Replay cache: `data/cache/worldmodels/` keyed by sha256 of inputs; local backend
 writes to the cache on every call so a rehearsal run populates replay mode.
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 import configparser
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -234,6 +235,53 @@ def stage_sessions(inputs: list[ClipInput], root: Path) -> Path:
 
 
 # ---------------------------------------------------------------- run
+# Stages the curated set can do without: on failure the clips keep template captions / lite embeddings.
+OPTIONAL_STAGES = {"03-video-caption", "04-video-embed", "05-mp4-index", "06-multimodal-split", "07-multimodal-caption"}
+
+# Older Cosmos-Embed1 revisions import these from transformers.modeling_utils; transformers 5 (Curator's
+# pixi env) only has them in transformers.pytorch_utils. Upstream fixed the import on the Hub; Curator's
+# model-download pins an earlier revision, so the local copy is patched the same way.
+_QFORMER_OLD = re.compile(
+    r"from transformers\.modeling_utils import \((?P<names>[^)]*)\)", re.S)
+_MOVED = ("apply_chunking_to_forward", "find_pruneable_heads_and_indices", "prune_linear_layer")
+
+
+def patch_qformer_source(src: str) -> str | None:
+    """Return ``src`` with the moved helpers imported from pytorch_utils, or None if nothing to change."""
+    m = _QFORMER_OLD.search(src)
+    if not m:
+        return None
+    names = [n.strip() for n in m.group("names").replace("\n", ",").split(",") if n.strip()]
+    moved = [n for n in names if n in _MOVED]
+    if not moved:
+        return None
+    keep = [n for n in names if n not in _MOVED]
+    new = ""
+    if keep:
+        new += "from transformers.modeling_utils import (\n" + "".join(f"    {n},\n" for n in keep) + ")\n"
+    new += "from transformers.pytorch_utils import (\n" + "".join(f"    {n},\n" for n in moved) + ")"
+    return src[:m.start()] + new + src[m.end():]
+
+
+def patch_remote_code(models_root: Path | None = None) -> list[Path]:
+    """Patch every downloaded Cosmos-Embed1 ``modeling_qformer.py`` (idempotent). Returns patched files."""
+    root = models_root or Path(os.environ.get("CURATOR_MODELS_DIR", "/config/models"))
+    patched = []
+    if not root.is_dir():
+        return patched
+    for f in root.rglob("modeling_qformer.py"):
+        try:
+            new = patch_qformer_source(f.read_text(encoding="utf-8"))
+            if new is not None:
+                f.write_text(new, encoding="utf-8")
+                patched.append(f)
+        except OSError as exc:
+            log.warning("could not patch %s: %s", f, exc)
+    for f in patched:
+        log.info("patched %s for transformers 5 (helpers moved to transformers.pytorch_utils)", f)
+    return patched
+
+
 def run_stage(yaml_path: Path, curator_home: Path, s3_profile_file: Path, attempts: int = 5) -> dict:
     """``pixi run --as-is run-pipeline <yaml> --json`` inside CURATOR_HOME.
 
@@ -332,7 +380,7 @@ def run_curator_next(input_dir: str | Path, out_dir: str | Path, *, captioner: s
                      dedup_enabled: bool = True):
     from curate.captions import TEMPLATE_MODEL, template_caption
     from curate.manifest import Thresholds, apply_filters, dedup, write_manifest
-    from curate.video import analyze, probe
+    from curate.video import EMBED_NAME, analyze, embed, probe
 
     out = Path(out_dir).resolve()
     all_inputs = discover_inputs(input_dir)
@@ -375,8 +423,19 @@ def run_curator_next(input_dir: str | Path, out_dir: str | Path, *, captioner: s
         upload_inputs(inputs, s3, curator_home)
     if captioner in CAPTION_VARIANTS_COSMOS3:
         stage_sessions(inputs, out)
+    patch_remote_code()
+    skipped: dict[str, str] = {}
     for p in paths:
-        res = run_stage(p, curator_home, profile_file)
+        try:
+            res = run_stage(p, curator_home, profile_file)
+        except RuntimeError as exc:
+            if p.stem not in OPTIONAL_STAGES:
+                raise
+            # keep what the earlier stages produced (cut + transcode is the curated clip set)
+            skipped[p.stem] = str(exc)[-1500:]
+            log.warning("Curator stage %s failed - continuing without it (template captions / lite "
+                        "embeddings fill in):\n%s", p.stem, str(exc)[-800:])
+            res = {"ok": False, "skipped": True, "error": str(exc)[-4000:]}
         (out / "configs" / f"{p.stem}.result.json").write_text(json.dumps(res, indent=2, default=str))
 
     records = read_back(out, inputs, captioner)
@@ -384,7 +443,9 @@ def run_curator_next(input_dir: str | Path, out_dir: str | Path, *, captioner: s
         local = Path(r.clip_uri)
         if local.exists():
             try:
-                r.quality, _ = analyze(local)
+                r.quality, visual = analyze(local)
+                if r.embedding is None:   # Cosmos-Embed1 stage skipped: same lite embedding as --backend lite
+                    r.embedding, r.embedding_name = embed(visual, r.source.sidecar.get("signal_stats")), EMBED_NAME
             except Exception as exc:  # noqa: BLE001
                 r.quality = {"error": str(exc)}
         if not r.caption:
@@ -399,4 +460,7 @@ def run_curator_next(input_dir: str | Path, out_dir: str | Path, *, captioner: s
     if dedup_enabled:
         dedup(records, th.dedup_cosine)
     write_manifest(records, out)
+    if skipped:
+        (out / "curator_skipped_stages.json").write_text(json.dumps(skipped, indent=2))
+        log.warning("Cosmos Curator ran with %d stage(s) skipped: %s", len(skipped), ", ".join(skipped))
     return records

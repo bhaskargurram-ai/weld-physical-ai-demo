@@ -130,12 +130,20 @@ if stage models bash runpod/start_all.sh models --wait; then
 else
   say "Cosmos 3 servers did not come up -> copilot will use nim/replay"
 fi
+if grep -q '"heuristic-fallback"' "${DATA_DIR}/cache/worldmodels/warm_report.json" 2>/dev/null; then
+  say "some Cosmos 3 results are placeholders - last lines of the model server logs:"
+  for svc in generator reasoner; do
+    tail -n 25 "${WS}/logs/${svc}.log" 2>/dev/null | sed "s/^/WELDWORLD ${svc}.log | /"
+  done
+fi
 
 # ---------------------------------------------------------------- 5. results (kept on the volume)
 {
   cp -f "${DATA_DIR}/curated/dataset_card.md" "${DATA_DIR}/curated/manifest.jsonl" "$RESULTS/" 2>/dev/null
   find "${DATA_DIR}/cache" -maxdepth 2 -name '*report*.json' -exec cp -f {} "$RESULTS/" \; 2>/dev/null
   cp -f "$LOG" "$RESULTS/run.log" 2>/dev/null
+  cp -f "${WS}/logs/reasoner.log" "${WS}/logs/generator.log" "$RESULTS/" 2>/dev/null
+  cp -f "${DATA_DIR}/curated/curator_skipped_stages.json" "$RESULTS/" 2>/dev/null
   tar -czf "${WS}/results/${RUN_ID}.tar.gz" -C "${WS}/results" "$RUN_ID" 2>/dev/null
 } || true
 say "results=${RESULTS} (tarball ${WS}/results/${RUN_ID}.tar.gz on the volume)"

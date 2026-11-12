@@ -391,7 +391,7 @@ def test_what_if_local_form_cache_and_replay(monkeypatch, tmp_path, fake_mp4):
     meta = generate.what_if_meta("travel speed drops 20% on the fill pass", seconds=5, seed=7, preset="live")
     assert meta["source"] == "cosmos3-local" and Path(meta["path"]).read_bytes() == fake_mp4
     req = [r for r in fake.requests if r.url.path.endswith("/videos/sync")][0]
-    assert str(req.url) == "http://localhost:8001/v1/videos/sync" and req.headers["accept"] == "video/mp4"
+    assert str(req.url) == "http://localhost:8010/v1/videos/sync" and req.headers["accept"] == "video/mp4"
     fields, files = form_fields(req)
     assert fields["size"] == "832x480" and fields["num_frames"] == "121" and fields["fps"] == "24"
     assert fields["num_inference_steps"] == "35" and fields["guidance_scale"] == "6.0" and fields["flow_shift"] == "10.0"
@@ -644,10 +644,10 @@ def test_frame_math():
 def test_generator_readiness_uses_health_not_models(monkeypatch):
     """vLLM-Omni answers /v1/models with 200 + [] while still loading; only /health means ready."""
     from worldmodels import config as cfgmod
-    monkeypatch.setenv("COSMOS_GENERATOR_URL", "http://localhost:8001")
+    monkeypatch.setenv("COSMOS_GENERATOR_URL", "http://localhost:8010")
     monkeypatch.setenv("COSMOS_REASONER_URL", "http://localhost:8000/v1")
     s = cfgmod.get_settings()
-    assert cfgmod.health_url("generator", s) == "http://localhost:8001/health"
+    assert cfgmod.health_url("generator", s) == "http://localhost:8010/health"
     assert cfgmod.health_url("reasoner", s) == "http://localhost:8000/v1/models"
-    monkeypatch.setenv("COSMOS_GENERATOR_URL", "http://localhost:8001/v1")
-    assert cfgmod.health_url("generator", cfgmod.get_settings()) == "http://localhost:8001/health"
+    monkeypatch.setenv("COSMOS_GENERATOR_URL", "http://localhost:8010/v1")
+    assert cfgmod.health_url("generator", cfgmod.get_settings()) == "http://localhost:8010/health"
