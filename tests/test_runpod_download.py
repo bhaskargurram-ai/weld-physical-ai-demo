@@ -25,9 +25,17 @@ class FakeS3:
                                     if k.startswith(Prefix)]}
         return P()
 
-    def download_file(self, bucket, key, dest):
-        self.downloads.append(key)
-        Path(dest).write_bytes(self.files[key])
+    def get_object(self, Bucket, Key):
+        self.downloads.append(Key)
+        if Key not in self.files:
+            from botocore.exceptions import ClientError
+            raise ClientError({"Error": {"Code": "404", "Message": "Not Found"}}, "GetObject")
+        data = self.files[Key]
+
+        class Body:
+            def iter_chunks(self, n):
+                yield data
+        return {"Body": Body()}
 
 
 def test_demo_preset_maps_volume_paths_into_local_data_and_is_resumable(tmp_path):
@@ -59,3 +67,22 @@ def test_demo_preset_maps_volume_paths_into_local_data_and_is_resumable(tmp_path
 def test_endpoint_and_supported_datacenters():
     assert dl.endpoint("US-NE-1") == "https://s3api-us-ne-1.runpod.io/"
     assert "US-NE-1" in dl.S3_DATACENTERS and "US-TX-3" not in dl.S3_DATACENTERS
+
+
+def test_a_file_the_volume_cannot_serve_is_skipped_not_fatal(tmp_path):
+    files = {"results/r1/card.md": b"card", "results/r1/gone.json": b"{}"}
+    s3 = FakeS3(files)
+    real = s3.get_object
+
+    def flaky(Bucket, Key):
+        if Key.endswith("gone.json"):          # listed, but 404 on read (seen on Runpod's S3 API)
+            from botocore.exceptions import ClientError
+            raise ClientError({"Error": {"Code": "404", "Message": "Not Found"}}, "GetObject")
+        return real(Bucket, Key)
+    s3.get_object = flaky
+    failed: list = []
+    n_new, _, total = dl.download(s3, "vol", dl.PRESETS["results"], tmp_path, failed=failed)
+    assert n_new == 1 and total == 4
+    assert failed == [("results/r1/gone.json", "404 Not Found")]
+    assert (tmp_path / "runpod_results/r1/card.md").exists()
+    assert not list(tmp_path.rglob("*.part"))

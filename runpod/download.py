@@ -114,7 +114,9 @@ def iter_objects(s3, bucket: str, prefix: str):
         yield from page.get("Contents") or []
 
 
-def download(s3, bucket: str, mapping: list[tuple[str, str]], dest: Path, dry_run: bool = False) -> tuple[int, int, int]:
+def download(s3, bucket: str, mapping: list[tuple[str, str]], dest: Path, dry_run: bool = False,
+             failed: list | None = None) -> tuple[int, int, int]:
+    failed = failed if failed is not None else []
     n_new = n_same = total = 0
     for remote, local in mapping:
         found = 0
@@ -134,12 +136,37 @@ def download(s3, bucket: str, mapping: list[tuple[str, str]], dest: Path, dry_ru
                 continue
             out.parent.mkdir(parents=True, exist_ok=True)
             tmp = out.with_name(out.name + ".part")
-            s3.download_file(bucket, key, str(tmp))
+            try:
+                fetch(s3, bucket, key, tmp)
+            except Exception as e:  # noqa: BLE001 - one bad object must not stop the whole download
+                tmp.unlink(missing_ok=True)
+                failed.append((key, _short_error(e)))
+                print(f"  ! skipped {key}: {_short_error(e)}", flush=True)
+                n_new -= 1
+                total -= obj["Size"]
+                continue
             tmp.replace(out)
             print(f"  {key}  ->  {out.relative_to(dest)}  ({obj['Size'] / 1e6:.1f} MB)", flush=True)
         if not found:
             print(f"  (nothing under {remote} yet)")
     return n_new, n_same, total
+
+
+def fetch(s3, bucket: str, key: str, tmp: Path) -> None:
+    """Plain GET, streamed to ``tmp``. (boto3's download_file starts with HeadObject, which Runpod's
+    S3 API answers 404 for some keys that list_objects returns.)"""
+    body = s3.get_object(Bucket=bucket, Key=key)["Body"]
+    with open(tmp, "wb") as f:
+        for chunk in body.iter_chunks(1 << 20):
+            f.write(chunk)
+
+
+def _short_error(e: Exception) -> str:
+    resp = getattr(e, "response", None) or {}
+    err = resp.get("Error") or {}
+    if err:
+        return f"{err.get('Code', '?')} {err.get('Message', '')}".strip()
+    return f"{type(e).__name__}: {e}"[:200]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -173,9 +200,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     dest = Path(args.dest)
-    n_new, n_same, total = download(s3, vid, PRESETS[args.what], dest, args.dry_run)
+    failed: list = []
+    n_new, n_same, total = download(s3, vid, PRESETS[args.what], dest, args.dry_run, failed)
     verb = "would download" if args.dry_run else "downloaded"
     print(f"{verb} {n_new} files ({total / 1e9:.2f} GB); {n_same} already up to date  ->  {dest}")
+    if failed:
+        print(f"{len(failed)} file(s) could not be read from the volume and were skipped "
+              "(re-running retries them):")
+        for key, err in failed[:15]:
+            print(f"  {key}  ({err})")
+        if len(failed) > 15:
+            print(f"  ... and {len(failed) - 15} more")
     if args.what in ("demo", "all") and not args.dry_run:
         print("\nRun the copilot locally on the GPU results (no GPU needed, Cosmos outputs come from data/cache):\n"
               "  COSMOS_BACKEND=replay MOSAICO_OFFLINE=1 COPILOT_LLM=scripted uvicorn copilot.app:app --port 7860\n"
