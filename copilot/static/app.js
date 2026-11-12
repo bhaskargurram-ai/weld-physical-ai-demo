@@ -365,8 +365,8 @@ function renderPhotoView() {
   const p = S.detail.pass || {}, nd = S.detail.ndt || {};
   const n = (nd.indications || []).length;
   $("#pvNdt").innerHTML = "";
-  $("#pvNdt").append(rtBadge(p.rt_result, p.defect_counts),
-    n ? h("span", { class: "pv-note" }, `${(nd.methods || []).join("/")} indications are internal — usually not visible on the bead surface`) : null);
+  $("#pvNdt").append(...kids(rtBadge(p.rt_result, p.defect_counts),
+    n ? h("span", { class: "pv-note" }, `${(nd.methods || []).join("/")} indications are internal — usually not visible on the bead surface`) : null));
   const img = $("#pvImg");
   if (!photos.length) { img.removeAttribute("src"); return; }
   if (img.getAttribute("src") !== photos[PV.i].url) { img.onload = () => pvFit(); img.src = photos[PV.i].url; }
@@ -635,10 +635,10 @@ function buildNdtStrip(box, sync, stripH) {
     if (w !== S.ndtHover) { S.ndtHover = w; u.redraw(false, false); }
     if (!w) { tip.classList.add("hidden"); return; }
     tip.innerHTML = "";
-    tip.append(h("b", { style: { color: defCol(w.defect) } }, prettyDef(w.defect)),
+    tip.append(...kids(h("b", { style: { color: defCol(w.defect) } }, prettyDef(w.defect)),
       h("div", {}, `${fmt(w.t_start, 2)}–${fmt(w.t_end, 2)} s from arc start`),
       w.x_start_mm != null ? h("div", {}, `x ${w.x_start_mm}–${w.x_end_mm} mm along the weld`) : null,
-      h("div", { class: "sub" }, `${w.method || (nd.methods || []).join(" + ") || "NDT"} indication · click to seek`));
+      h("div", { class: "sub" }, `${w.method || (nd.methods || []).join(" + ") || "NDT"} indication · click to seek`)));
     tip.classList.remove("hidden");
     tip.style.left = `${Math.min(e.clientX + 12, innerWidth - 230)}px`; tip.style.top = `${e.clientY - 70}px`;
   });
@@ -1329,7 +1329,7 @@ async function loadFlow() {
     h("header", { class: "fl-head" }, h("h2", {}, "How WeldWorld works"),
       h("p", {}, (RD ? "From real welds to a decision: public AIMEN and BAM welding data, " : "From the weld cell to a decision: ")
         + "what each step does, which component does it, and what it produced for this dataset. Click a step to open its tab.")),
-    lane, finding, story, credits, where);
+    ...kids(lane, finding, story, credits, where));
 }
 
 /* ===================================================================== data sources & credits */

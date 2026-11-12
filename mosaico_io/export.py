@@ -266,6 +266,14 @@ def select_sequences(data_source: Optional[str] = None) -> list[str]:
     return [r["sequence_name"] for r in rows]
 
 
+def _clear_previous(out: Path) -> None:
+    """Remove the files an earlier export wrote into ``out`` (sidecars, clips, controls, photos)."""
+    for pat in ("*.json", "*.mp4", "clips.jsonl", "control/*.mp4", "photos/*/*.jpg"):
+        for f in out.glob(pat):
+            if f.is_file():
+                f.unlink()
+
+
 def export_clips(out_dir, sequences: Optional[list[str]] = None, clip_s: float = CLIP_SECONDS,
                  include_control: bool = True, quiet: bool = True, data_source: Optional[str] = None) -> list[dict]:
     """Write <out>/<clip_id>.mp4 + .json sidecars for defect / NDT-indication and clean windows.
@@ -277,6 +285,7 @@ def export_clips(out_dir, sequences: Optional[list[str]] = None, clip_s: float =
     out.mkdir(parents=True, exist_ok=True)
     if sequences is None:
         sequences = select_sequences(data_source)
+        _clear_previous(out)          # full export: stale windows of an earlier run must not reach curation
     results = []
     failed: list[str] = []
     for seq in sequences:

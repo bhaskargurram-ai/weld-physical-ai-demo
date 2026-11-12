@@ -337,7 +337,9 @@ class ScriptedAgent(BaseAgent):
             rej = [p for p in ps if p["rt"] == "reject"]
             real = [p for p in ps if not p.get("simulated", True)]
             if real and viol and len(viol) == len(ps):
-                parts.append(f"**{len(viol)} pass{'es' if len(viol) != 1 else ''} ran outside their published settings:**")
+                nv = r.get('count', len(viol))
+                parts.append(f"**{nv} pass{'es' if nv != 1 else ''} ran outside their published settings**"
+                             + (f" (first {min(len(viol), 8)} below; the table lists up to 40):" if nv > 8 else ":"))
                 for p in viol[:8]:
                     sim = " · *SIMULATED*" if p.get("simulated") else ""
                     parts.append(f"- `{p['sequence']}` — {', '.join(_pname(x) for x in p['violated'])} outside the "

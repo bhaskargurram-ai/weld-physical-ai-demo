@@ -218,7 +218,11 @@ def test_convert_writes_contract(converted):
     assert "Chaurasia" in m["source"]["authors"]
     w = m["wps"]
     assert w["wfs_mpm"] == pytest.approx([18.0, 22.0]) and w["travel_speed_mmps"] == pytest.approx([6.3, 7.7])
-    assert w["gas_lpm"] == pytest.approx([16.0, 24.0]) and w["current_a"] == pytest.approx([353.25, 431.75])
+    assert w["gas_lpm"] == pytest.approx([16.0, 24.0])
+    # current/voltage: PQR-style, measured steady mean ±10 % (synergic GMAW has no I/U command)
+    assert w["current_a"] == pytest.approx([0.9 * m["measured"]["current_a"], 1.1 * m["measured"]["current_a"]],
+                                           rel=1e-3)
+    assert m["nominal"]["recommended"]["current_lead_a"] == 392.5
     assert w["wfs2_mpm"] == pytest.approx([13.5, 16.5])
     assert m["arc_on_s"] == pytest.approx(ARC1 - ARC0, abs=0.01)
     assert m["duration_s"] == pytest.approx(ARC1 - ARC0 + 1.0, abs=0.01)
